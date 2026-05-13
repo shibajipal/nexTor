@@ -9,10 +9,33 @@ import asyncio
 from downloader import download_piece
 from parser import calculate_info_hash, parse_magnet_link, parse_torrent
 from peer import read_exactly, tcp_handshake, extension_handshake, find_peers, PeerSession
+from concurrent.futures import ThreadPoolExecutor
 
-
-
-def main():
+async def peer_worker(session, queue, length, total_length, content_pieces):
+    while True:
+        try:
+            piece_index = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        
+        if not session.has_piece(piece_index):
+            queue.put_nowait(piece_index)
+            continue
+        
+        loop = asyncio.get_event_loop()
+        buffer = await loop.run_in_executor(None, download_piece, session.sock, piece_index, length, total_length)
+        content_pieces[piece_index] = buffer
+        
+async def download_all(sessions, piece_count, length, total_length):
+    content_pieces = [None] * piece_count
+    queue = asyncio.Queue()
+    for i in range(piece_count):
+        queue.put_nowait(i)
+        
+    tasks = [peer_worker(session, queue, length, total_length, content_pieces) for session in sessions]
+    await asyncio.gather(*tasks)
+    return b"".join(content_pieces)
+async def main():
     command = sys.argv[1]
     if command == "download_torrent":
         download_path = sys.argv[2]
@@ -25,7 +48,7 @@ def main():
         all_peers = find_peers(tracker=tracker, info_hash=info_hash, left=length)
 
         sessions = []
-        for p in all_peers[:5]:
+        for p in all_peers:
             HOST, PORT = p.split(":")
             session = PeerSession(HOST, int(PORT), info_hash)
             try:
@@ -40,32 +63,12 @@ def main():
             
         total_content = b""
         piece_count = math.ceil(total_length / length)
-        content_pieces = [b""] * piece_count
-        remaining = list(range(piece_count))
+
         
-        while remaining:
-            assigned_any = False
-            
-            for session in sessions:
-                if not remaining:
-                    break
-                for i, piece_index in enumerate(remaining):
-                    if session.has_piece(piece_index):
-                        print(f"downloading piece {piece_index} from {session.host}")
-                        buffer = download_piece(session.sock, piece_index, length, total_length)
-                        content_pieces[piece_index] = buffer
-                        remaining.pop(i)
-                        assigned_any = True
-                        break
-            if not assigned_any:
-                raise RuntimeError("no peer has the pieces we need")
-        
-        # for piece_index in range(0, math.ceil(total_length / length)):
-        #     buffer = download_piece(peer, piece_index, length, total_length)
-        #     content_pieces[piece_index] = buffer
-        
-        for i in content_pieces:
-            total_content += i
+
+        total_content = await download_all(sessions, piece_count, length, total_length)
+        # for i in content_pieces:
+        #     total_content += i
         with open(download_path, "wb") as f:
             f.write(total_content)
             
@@ -126,4 +129,4 @@ def main():
         raise NotImplementedError(f"Unknown command {command}")
         
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
