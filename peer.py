@@ -2,9 +2,10 @@
 # this file consists of helper functions that help to find out the peer 
 
 
+
 import bencodepy
 import requests
-
+import socket
 def read_exactly(sock, n):
     data = b""
     while len(data) < n:
@@ -89,3 +90,96 @@ def find_peers(tracker,
     print(all_peers)
     
     return all_peers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class PeerSession:
+
+    def __init__(self, host, port, info_hash, peer_id = "a"*20):
+
+        self.host = host
+        self.port = port
+        self.info_hash = info_hash
+        self.peer_id = peer_id
+        self.sock = None
+        self.remote_peer_id = None                 
+        self.bitfield = None
+        self.is_choking = True
+        self.is_interested = False
+        self.peer_choking = True
+        self.peer_interested = False
+        
+        
+        
+    def connect(self):
+        self.sock = socket.create_connection((self.host, self.port), timeout=10)
+        
+        self.remote_peer_id = tcp_handshake(sock=self.sock,
+                                            info_hash=self.info_hash,
+                                            peer_id=self.peer_id)
+        self.bitfield_wait()
+        self.interested_send()
+        self.unchoke_wait()
+        
+        
+        
+    def read_message(self):
+        length_prefix = read_exactly(self.sock, 4)
+        message_length = int.from_bytes(length_prefix, "big")
+        if message_length == 0:
+            return None, None
+        message_body = read_exactly(self.sock, message_length)
+        return message_body[0], message_body[1:]
+
+    def has_piece(self, piece_index):
+        if self.bitfield is None:
+            return False
+        
+        byte_index = piece_index // 8
+        bit_index = 7 - (piece_index % 8)
+        
+        if byte_index >= len(self.bitfield):
+            return False
+        return bool(self.bitfield[byte_index] & (1 << bit_index))
+
+
+    def disconnect(self):
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+        
+    def bitfield_wait(self):
+        while True:
+            msg_id, payload = self.read_message()
+            if msg_id == 5:
+                self.bitfield = payload
+                break
+            
+            elif msg_id == 4:
+                pass
+            
+    def interested_send(self):
+        msg = (1).to_bytes(4, "big") + (2).to_bytes(1, "big")
+        self.sock.send(msg)
+        self.is_interested = True
+        
+    def unchoke_wait(self):
+        while True:
+            msg_id, payload = self.read_message()
+            if msg_id == 1:
+                self.peer_choking = False
+                break
+                

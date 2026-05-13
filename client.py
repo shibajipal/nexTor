@@ -5,9 +5,11 @@ import sys
 import socket
 import math
 import bencodepy
+import asyncio
 from downloader import download_piece
 from parser import calculate_info_hash, parse_magnet_link, parse_torrent
-from peer import read_exactly, tcp_handshake, extension_handshake, find_peers
+from peer import read_exactly, tcp_handshake, extension_handshake, find_peers, PeerSession
+
 
 
 def main():
@@ -21,35 +23,49 @@ def main():
         
         info_hash = calculate_info_hash(content)
         all_peers = find_peers(tracker=tracker, info_hash=info_hash, left=length)
-        p = all_peers[0]
-        HOST, PORT = p.split(":")
-        peer = socket.create_connection((HOST, PORT))
-        print("handshake start")
-        received_peer_id = tcp_handshake(sock=peer, info_hash=info_hash)
-        print("successful handshake")
-        while True:
-            length_prefix = read_exactly(peer, 4) 
-            message_length = int.from_bytes(length_prefix, "big")
-            bitfield_body = read_exactly(peer, message_length)
-            print("bitfield check", bitfield_body)
-            if bitfield_body[0] == 5:
-                break
-        interested_message = (1).to_bytes(4, "big") + (2).to_bytes(1, "big")
-        print("interested message", interested_message)
-        peer.send(interested_message)
-        while True:
-            length_prefix = read_exactly(peer, 4)
-            message_length = int.from_bytes(length_prefix, "big")
-            unchoke_body = read_exactly(peer, message_length)
-            print("unchoke body", unchoke_body)
-            if unchoke_body[0] == 1:
-                break
-        
+
+        sessions = []
+        for p in all_peers[:5]:
+            HOST, PORT = p.split(":")
+            session = PeerSession(HOST, int(PORT), info_hash)
+            try:
+                session.connect()
+                sessions.append(session)
+                print(f"connected to {p}")
+            except Exception as e:
+                print(f"failed to connect to {p}: {e}")
+        if not sessions:
+            print(f"failed to connect to any peer")
+            
+            
         total_content = b""
-        for piece_index in range(0, math.ceil(total_length / length)):
-            buffer = download_piece(peer, piece_index, length, total_length)
-            total_content += buffer
-            print("total content", len(total_content))
+        piece_count = math.ceil(total_length / length)
+        content_pieces = [b""] * piece_count
+        remaining = list(range(piece_count))
+        
+        while remaining:
+            assigned_any = False
+            
+            for session in sessions:
+                if not remaining:
+                    break
+                for i, piece_index in enumerate(remaining):
+                    if session.has_piece(piece_index):
+                        print(f"downloading piece {piece_index} from {session.host}")
+                        buffer = download_piece(session.sock, piece_index, length, total_length)
+                        content_pieces[piece_index] = buffer
+                        remaining.pop(i)
+                        assigned_any = True
+                        break
+            if not assigned_any:
+                raise RuntimeError("no peer has the pieces we need")
+        
+        # for piece_index in range(0, math.ceil(total_length / length)):
+        #     buffer = download_piece(peer, piece_index, length, total_length)
+        #     content_pieces[piece_index] = buffer
+        
+        for i in content_pieces:
+            total_content += i
         with open(download_path, "wb") as f:
             f.write(total_content)
             

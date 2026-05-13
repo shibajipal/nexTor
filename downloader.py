@@ -1,9 +1,10 @@
 # downloader.py
 # this file has the helper functions to download each piece of a torrent or magnet file
-from peer import read_exactly
+from peer import read_exactly, tcp_handshake, PeerSession
 
 def download_piece(peer, piece_index, length, total_length):
     print("downloading piece", piece_index)
+    
     buffer = b""
     begin = 0
     block_length = 2 ** 14
