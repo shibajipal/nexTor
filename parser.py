@@ -30,3 +30,23 @@ def parse_magnet_link(magnet_link):
     tracker = magnet_link.split("&tr=")[-1]
     tracker = unquote(tracker)
     return (info_hash, tracker)
+
+def parse_file_info(info):
+    if b"files" in info:
+        files = []
+        total_length = 0
+        root_name = info[b"name"].decode()
+        
+        for f in info[b"files"]:
+            path_parts = [p.decode() for p in f[b"path"]]
+            full_path = os.path.join(root_name, *path_parts)
+            file_length = f[b"length"]
+            files.append((full_path, file_length))
+            
+            total_length += file_length
+        return files, total_length
+    
+    else:
+        name = info[b"name"].decode()
+        length = info[b"length"]
+        return [(name, length)], length

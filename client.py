@@ -1,13 +1,14 @@
 # client.py
 # this is the main file that is run, and both downloading torrent and magnet files is supported
 # usage:-  python client.py download_torrent <path> <torrent>
+import os
 import sys
 import socket
 import math
 import bencodepy
 import asyncio
 from downloader import download_piece
-from parser import calculate_info_hash, parse_magnet_link, parse_torrent
+from parser import calculate_info_hash, parse_magnet_link, parse_torrent, parse_file_info
 from peer import read_exactly, tcp_handshake, extension_handshake, find_peers, PeerSession
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,7 +43,9 @@ async def main():
         file = sys.argv[3]
         
         content = parse_torrent(file)
-        tracker, total_length, length = content[b"announce"], content[b"info"][b"length"], content[b"info"][b"piece length"]
+        tracker = content[b"announce"]
+        length = content[b"info"][b"piece length"]
+        files, total_length = parse_file_info(content[b"info"])
         
         info_hash = calculate_info_hash(content)
         all_peers = find_peers(tracker=tracker, info_hash=info_hash, left=length)
@@ -69,8 +72,21 @@ async def main():
         total_content = await download_all(sessions, piece_count, length, total_length)
         # for i in content_pieces:
         #     total_content += i
-        with open(download_path, "wb") as f:
-            f.write(total_content)
+        
+        if len(files) == 1:
+            with open(download_path, "wb") as f:
+                f.write(total_content)
+        else:
+            offset = 0
+            for file_path, file_length in files:
+                output_path = os.path.join(download_path, file_path)
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                file_data = total_content[offset : offset + file_length]
+                with open(output_path, "wb") as f:
+                    f.write(file_data)
+                    
+                print(f"written: {file_path} ({file_length}) bytes")
+                offset += file_length
             
             
     elif command == "magnet_download":
