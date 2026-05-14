@@ -1,210 +1,272 @@
+<div align="center">
+
 # nexTor
 
-nexTor is a custom-built BitTorrent client that explores peer-to-peer file distribution from first principles. It is designed not merely as a downloader, but as a structured and deliberate implementation of the BitTorrent protocol stack, focusing on clarity, correctness, and an understanding of how decentralized systems coordinate data exchange.
+### A BitTorrent client built from scratch in Python.
 
-The client currently supports **single-file torrents** and **single-file magnet links**. It implements core aspects of peer discovery and communication using **BEP 3 (BitTorrent Protocol Specification)** and **BEP 23 (Compact Peer Lists)**, allowing it to participate in real BitTorrent swarms while maintaining a minimal and focused scope.
+*No libraries. No shortcuts. Just raw sockets, binary protocols, and peer-to-peer networking, the way it was meant to be understood.*
 
----
-
-## Installation
-
-* Clone the repository
-
-   `git clone https://github.com/your-username/nexTor.git`
-
-* Navigate into the project directory
-
-   `cd nexTor`
-
-* Run the client
-
-   `py client.py download_torrent <path to where you want to save> <path to your torrent file>`
-  
-   or
-  
-   `py client.py download_magnet <path to where you want to save> <magnet link>`
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+[![Protocol](https://img.shields.io/badge/Protocol-BitTorrent-orange?style=for-the-badge)](https://www.bittorrent.org/beps/bep_0003.html)
 
 ---
 
-## Core Principles
+<img width="700" alt="terminal demo" src="https://github.com/user-attachments/assets/placeholder">
 
-The workflow of nexTor follows the fundamental lifecycle of a BitTorrent download, broken into clearly defined stages:
+</div>
 
----
+<br>
 
-### 1) Metadata Extraction
+## What is nexTor?
 
-* The process begins by parsing either:
-  → a `.torrent` file
-  → or a magnet link
+**nexTor** is a from-scratch BitTorrent client that implements the core protocol stack using nothing but Python's standard library and raw TCP/UDP sockets. It's not a wrapper around `libtorrent`. Every handshake, every binary message, every piece assembly is written by hand.
 
-* For a **torrent file**:
-  → The file is **bencoded**, a compact serialization format used throughout BitTorrent
-  → It is decoded to extract:
+The goal isn't to replace qBittorrent. It's to **understand** how decentralized file distribution actually works at the byte level.
 
-  * `announce` (tracker URL)
-  * `info` dictionary (file metadata)
-  * `piece length`, `pieces`, and total file length
+<br>
 
-  → The **info hash** is computed by:
+## Features
 
-  * Re-encoding the `info` dictionary using bencoding
-  * Applying SHA-1 hashing to it
+| Feature | Details |
+|---|---|
+| **Single & Multi-File Torrents** | Downloads single files or reconstructs complex directory trees from multi-file torrents |
+| **Magnet Link Support** | Fetches torrent metadata directly from peers using the extension protocol (BEP 10) |
+| **HTTP + UDP Trackers** | Discovers peers from both HTTP (BEP 3) and UDP (BEP 15) tracker protocols |
+| **Multi-Tracker Discovery** | Queries every tracker in the `announce-list` in parallel for maximum peer coverage |
+| **Async Concurrent Downloads** | Distributes pieces across all connected peers simultaneously using `asyncio` |
+| **Request Pipelining** | Keeps 5 block requests in-flight per peer to saturate bandwidth (no stop-and-wait) |
+| **Endgame Mode** | When few pieces remain, broadcasts them to all peers to eliminate tail latency |
+| **Live Progress Bar** | Real-time display with speed, ETA, percentage, and piece counter |
+| **Parallel Peer Connections** | Connects to up to 250 peers simultaneously via thread pool |
+| **Choke/Unchoke Handling** | Gracefully handles peer choking, re-queues pieces and waits for unchoke |
+| **Bitfield Tracking** | Tracks which pieces each peer has for intelligent piece selection |
+| **BEP 23 Compact Peers** | Parses both standard and compact (6-byte) peer list formats |
 
-* For a **magnet link**:
-  → No file metadata is directly available
-  → The client extracts:
+<br>
 
-  * `info_hash`
-  * `tracker URL` (if present)
-
-  → Metadata will later be fetched from peers using the info hash
-
----
-
-### 2) Peer Discovery via Tracker
-
-* Using the extracted information, nexTor contacts the tracker to obtain a list of peers.
-
-* The request payload typically follows:
+## Project Structure
 
 ```
-payload = {
-  "info_hash": <calculated info hash>,
-  "peer_id": <peer ID of the client>,
-  "port": <port of the client>,
-  "uploaded": <default: 0, uploaded size>,
-  "downloaded": <default: 0, downloaded size>,
-  "left": <default: 2^31 - 1, how much is left>,
-  "compact": <default: 1, signifies BEP 3 / BEP 23>
-}
+nexTor/
+├── client.py        # Main entry point, orchestrates the entire download lifecycle
+├── peer.py          # Peer discovery, TCP/BT handshakes, PeerSession state machine
+├── downloader.py    # Piece-level download engine with request pipelining
+├── parser.py        # .torrent file & magnet link parsing, info hash computation
+├── downloads/       # Default download output directory
+└── README.md
 ```
 
-* Key ideas:
-  → `info_hash` uniquely identifies the torrent
-  → `peer_id` identifies the client instance
-  → `left` indicates remaining bytes to download
-  → `compact=1` requests a compact peer list (BEP 23)
+<br>
 
-* The tracker response is also **bencoded**, requiring decoding.
+## Getting Started
 
-* Peer list formats:
+### Prerequisites
 
-  → **BEP 3 (Standard format)**
+- **Python 3.10+**
+- Install dependencies:
 
-  * Peers are returned as a list of dictionaries
-  * Each entry contains:
+```bash
+pip install bencodepy requests
+```
 
-    * IP address
-    * Port
+### Installation
 
-  → **BEP 23 (Compact format)**
+```bash
+git clone https://github.com/shibajipal/nexTor.git
+cd nexTor
+```
 
-  * Peers are returned as a binary string
-  * Each peer occupies 6 bytes:
+### Usage
 
-    * First 4 bytes → IP address
-    * Last 2 bytes → Port
+**Download from a `.torrent` file:**
+```bash
+python client.py download_torrent <save_path> <torrent_file>
+```
 
-* nexTor parses both formats to construct a usable list of peers.
+**Download from a magnet link:**
+```bash
+python client.py magnet_download <save_path> "<magnet_link>"
+```
 
----
+> [!TIP]
+> Wrap magnet links in quotes to prevent the shell from splitting on `&` characters.
 
-### 3) Establishing Connection
+#### Examples
 
-* For each discovered peer:
+```bash
+# Single file torrent
+python client.py download_torrent ./downloads/ubuntu.iso ubuntu-24.04.torrent
 
-  → A **TCP socket connection** is created using the peer’s IP and port
+# Multi-file torrent (directory structure is auto-created)
+python client.py download_torrent ./downloads/ archlinux-2024.torrent
 
-* The first step is the **BitTorrent handshake**, which is distinct from the TCP handshake:
+# Magnet link
+python client.py magnet_download ./downloads/file.iso "magnet:?xt=urn:btih:..."
+```
 
-  → **TCP handshake**
+<br>
 
-  * Standard 3-step process:
+## What It Looks Like
 
-    * SYN
-    * SYN-ACK
-    * ACK
-  * Establishes a reliable connection
+```
+found 147 unique peers from 12 trackers
+connected to 85.214.42.193:51413
+connected to 192.168.1.45:6881
+...
+there are 1 files in total and total length is 4293652480
+the info hash is b'\xa3\xf2...'
+there will be total 16380 pieces and each piece is 262144
 
-  → **BitTorrent handshake**
+  [████████████████░░░░░░░░░░░░░░]  53.2%  2.1/4.0 GB  3.8 MB/s  ETA 8m42s  [8714/16380 pieces]
+```
 
-  * Sent immediately after TCP connection
-  * Structure includes:
+<br>
 
-    * Protocol string (`BitTorrent protocol`)
-    * Reserved bytes
-    * `info_hash`
-    * `peer_id`
+## How It Works: Protocol Deep Dive
 
-* Purpose:
-  → Verifies that both peers are participating in the same torrent
-  → Establishes identity and compatibility
+### The Download Lifecycle
 
-* For **magnet links**:
-  → After handshake, metadata exchange may be required
-  → This typically uses extension protocols to retrieve torrent metadata
-
----
-
-### 4) Peer Communication
-
-Once the handshake is complete, structured message exchange begins.
-
-* Initial state:
-
-  → Peer sends a **bitfield message**
-
-  * A bitmap indicating which pieces the peer possesses
-
-* nexTor responds:
-
-  → Sends an **interested message**
-
-  * Indicates willingness to download pieces
-
-* Peer behavior:
-
-  → If the peer allows data transfer:
-
-  * It sends an **unchoke message**
-  * This grants permission to request pieces
-
-* Data transfer:
-
-  → nexTor sends **request messages** specifying:
-
-  * Piece index
-  * Offset within the piece
-  * Block length
-
-  → Peer responds with **piece messages** containing actual data
-
-* Flow control:
-
-  → Communication is strictly message-based
-  → Each message follows a length-prefixed binary format
-  → Proper sequencing is required to maintain state consistency
+```
+  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+  │  1. PARSE    │────▶│  2. DISCOVER │────▶│ 3. CONNECT   │────▶│ 4. DOWNLOAD  │────▶│ 5. ASSEMBLE  │
+  │  Metadata    │     │  Peers       │     │  Handshake   │     │  Pieces      │     │  File(s)     │
+  └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+   .torrent file       HTTP/UDP            TCP + BitTorrent     Async pipeline      SHA-1 verify
+   or magnet link      tracker announce    handshake            with endgame        + write to disk
+```
 
 ---
 
-### 5) Piece Assembly and Completion
+### 1 > Metadata Extraction
 
-* Downloaded data arrives in **blocks**, which are parts of pieces.
+**From `.torrent` files:**
+The file is [bencoded](https://wiki.theory.org/BitTorrentSpecification#Bencoding), a compact binary serialization format. nexTor decodes it to extract the tracker URL, piece length, piece SHA-1 hashes, and the file layout. The **info hash** is computed by re-encoding the `info` dictionary and applying SHA-1.
 
-* nexTor:
-
-  → Assembles blocks into complete pieces
-  → Verifies each piece using SHA-1 hash comparison
-
-* Once all pieces are verified:
-
-  → They are written sequentially to reconstruct the final file
-
-* Completion condition:
-
-  → All pieces successfully downloaded and validated
+**From magnet links:**
+Only the `info_hash` and tracker URL are available. The actual torrent metadata is fetched later from peers using the **Extension Protocol (BEP 10)**. nexTor sends an extension handshake, requests metadata pieces, and reconstructs the full `info` dictionary from the peer's response.
 
 ---
 
+### 2 > Peer Discovery
 
+nexTor contacts every tracker in the torrent's `announce-list` in parallel using a thread pool:
+
+- **HTTP Trackers (BEP 3):** Standard GET request with the info hash, peer ID, and download stats. Response contains a bencoded peer list, either as a list of dictionaries or a compact binary string (BEP 23, 6 bytes per peer).
+
+- **UDP Trackers (BEP 15):** A two-phase protocol. First a `connect` request to get a `connection_id`, then an `announce` request carrying the torrent metadata. The response contains a raw binary peer list.
+
+All discovered peers are deduplicated into a single pool.
+
+---
+
+### 3 > Peer Handshake
+
+For each peer, nexTor establishes a **TCP connection** and immediately sends the **BitTorrent handshake**:
+
+```
+[1 byte: 19] [19 bytes: "BitTorrent protocol"] [8 bytes: reserved] [20 bytes: info_hash] [20 bytes: peer_id]
+```
+
+After the handshake, the peer sends a **bitfield** message (a bitmap of which pieces it has), nexTor sends an **interested** message, and waits for the peer to **unchoke**, granting permission to request data.
+
+For magnet links, the reserved bytes signal extension protocol support (`0x10` in byte 6), enabling the metadata exchange.
+
+---
+
+### 4 > Piece Download
+
+This is where the performance engineering lives:
+
+- **Async Workers:** Each connected peer gets its own `asyncio` coroutine pulling pieces from a shared queue.
+- **Request Pipelining:** Instead of waiting for each block response before sending the next request, nexTor keeps **5 requests in-flight** simultaneously per peer, eliminating round-trip latency.
+- **Choke Recovery:** If a peer chokes mid-download, the piece is re-queued for another peer, and the worker waits for an unchoke signal (with a 30-second timeout).
+- **Endgame Mode:** When the number of remaining pieces drops below the active peer count, every remaining piece is broadcast to *all* peers. The first response wins; duplicates are discarded.
+
+---
+
+### 5 > File Assembly
+
+Downloaded blocks are assembled into pieces, and pieces are concatenated into the final byte stream. For **multi-file torrents**, nexTor slices the stream at the correct byte offsets and writes each file to its proper path, auto-creating directories as needed.
+
+<br>
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                          client.py                                   │
+│                                                                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────────────┐  │
+│  │ ProgressBar  │  │ EndgameMode  │  │ download_all()            │  │
+│  │ (real-time)  │  │ (tail optim) │  │ async peer orchestration  │  │
+│  └──────────────┘  └──────────────┘  └───────────────────────────┘  │
+│                            │                       │                 │
+│                            ▼                       ▼                 │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │                    peer_worker()                             │    │
+│  │            one coroutine per connected peer                  │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────────────────┘
+         │                    │                        │
+         ▼                    ▼                        ▼
+  ┌─────────────┐    ┌──────────────┐        ┌──────────────┐
+  │  parser.py   │    │   peer.py    │        │ downloader.py│
+  │              │    │              │        │              │
+  │ .torrent     │    │ PeerSession  │        │ Pipelined    │
+  │  parsing     │    │ HTTP tracker │        │ block I/O    │
+  │ magnet links │    │ UDP tracker  │        │ choke handle │
+  │ info hash    │    │ handshakes   │        │              │
+  └─────────────┘    └──────────────┘        └──────────────┘
+```
+
+<br>
+
+## Implemented BEPs
+
+| BEP | Title | Status |
+|-----|-------|--------|
+| [BEP 3](https://www.bittorrent.org/beps/bep_0003.html) | The BitTorrent Protocol Specification | Implemented |
+| [BEP 10](https://www.bittorrent.org/beps/bep_0010.html) | Extension Protocol | Implemented |
+| [BEP 15](https://www.bittorrent.org/beps/bep_0015.html) | UDP Tracker Protocol | Implemented |
+| [BEP 23](https://www.bittorrent.org/beps/bep_0023.html) | Compact Peer Lists | Implemented |
+
+<br>
+
+## Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| [`bencodepy`](https://pypi.org/project/bencodepy/) | Bencoding/decoding for torrent metadata and tracker responses |
+| [`requests`](https://pypi.org/project/requests/) | HTTP tracker communication |
+
+Everything else (TCP sockets, UDP datagrams, binary protocol parsing, async orchestration) is pure Python standard library.
+
+<br>
+
+## Roadmap
+
+- [ ] DHT peer discovery (BEP 5), trackerless torrents
+- [ ] Peer Exchange (PEX, BEP 11), discover peers from peers
+- [ ] Seeding / upload support
+- [ ] Piece SHA-1 verification with corrupt piece re-download
+- [ ] Resume interrupted downloads
+- [ ] TUI interface with per-peer stats
+
+<br>
+
+## License
+
+This project is open source and available under the [MIT License](LICENSE).
+
+<br>
+
+<div align="center">
+
+---
+
+Built with raw sockets and curiosity.
+
+**[shibajipal](https://github.com/shibajipal)**
+
+</div>
