@@ -79,12 +79,30 @@ def try_connect(peer_address, info_hash):
     session.connect()
     return session
 
-async def peer_worker(session, queue, length, total_length, content_pieces, progress):
+async def endgame_checker(content_pieces, queue, sessions, piece_count):
+    threshold = len(sessions)
+    triggered = False
+    
+    while not triggered:
+        await asyncio.sleep(1)
+        remaining = [i for i in range(piece_count) if content_pieces[i] is None]
+        if len(remaining) <= threshold and len(remaining) > 0:
+            triggered = True
+            for piece_index in remaining:
+                for _ in sessions:
+                    queue.put_nowait(piece_index)
+                    
+
+async def peer_worker(session, queue, length, total_length, content_pieces, progress, endgame_threshold=5):
     while True:
         try:
             piece_index = queue.get_nowait()
         except asyncio.QueueEmpty:
             return
+        
+        
+        if content_pieces[piece_index] is not None:
+            continue
         
         if not session.has_piece(piece_index):
             queue.put_nowait(piece_index)
@@ -94,19 +112,27 @@ async def peer_worker(session, queue, length, total_length, content_pieces, prog
         try:
             loop = asyncio.get_event_loop()
             buffer = await loop.run_in_executor(None, download_piece, session.sock, piece_index, length, total_length)
-            content_pieces[piece_index] = buffer
-            progress.update(len(buffer))
+            
+            
+            if content_pieces[piece_index] is None:
+                content_pieces[piece_index] = buffer
+                progress.update(len(buffer))
         except ChokedError:
-            # peer choked us — put piece back for another peer (or retry later)
+            # peer choked us — put piece back for another peer
             queue.put_nowait(piece_index)
-            # wait for unchoke before trying again
-            try:
+            # wait for unchoke in a thread so we don't block the event loop
+            def wait_for_unchoke():
                 while True:
                     msg_id, _ = session.read_message()
                     if msg_id == 1:  # unchoke
-                        break
+                        return
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, wait_for_unchoke),
+                    timeout=30
+                )
             except Exception:
-                return  # peer is dead, stop this worker
+                return  # peer is dead or timed out, stop this worker
         except Exception as e:
             # timeout, disconnect, etc. — put piece back and retire this peer
             queue.put_nowait(piece_index)
@@ -128,8 +154,10 @@ async def download_all(sessions, piece_count, length, total_length):
         queue.put_nowait(i)
     
     display_task = asyncio.create_task(progress_display(progress))
+    endgame_task = asyncio.create_task(endgame_checker(content_pieces, queue, sessions, piece_count))
     tasks = [peer_worker(session, queue, length, total_length, content_pieces, progress) for session in sessions]
     await asyncio.gather(*tasks)
+    endgame_task.cancel()
     await display_task
     return b"".join(content_pieces)
 async def main():
