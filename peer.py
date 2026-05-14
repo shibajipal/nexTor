@@ -135,8 +135,8 @@ def find_peers(tracker,
     return all_peers
 
 def find_peers_auto(tracker, info_hash, **kwargs):
-    if tracker.startswith(b"udp://") or tracker.startswith("udp://"):
-        tracker_str = tracker.decode() if isinstance(tracker, bytes) else tracker
+    tracker_str = tracker.decode() if isinstance(tracker, bytes) else tracker
+    if tracker_str.startswith("udp://"):
         return find_udp_peers(tracker_str, info_hash, **kwargs)
     else:
         return find_peers(tracker, info_hash, **kwargs)

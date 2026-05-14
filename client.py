@@ -86,7 +86,9 @@ async def endgame_checker(content_pieces, queue, sessions, piece_count):
     while not triggered:
         await asyncio.sleep(1)
         remaining = [i for i in range(piece_count) if content_pieces[i] is None]
-        if len(remaining) <= threshold and len(remaining) > 0:
+        if not remaining:
+            return  # all done, nothing to do
+        if len(remaining) <= threshold:
             triggered = True
             for piece_index in remaining:
                 for _ in sessions:
@@ -139,10 +141,13 @@ async def peer_worker(session, queue, length, total_length, content_pieces, prog
             print(f"\npeer {session.host} failed: {e}")
             return
         
-async def progress_display(progress):
+async def progress_display(progress, content_pieces):
     while progress.completed_pieces < progress.piece_count:
         progress.display()
         await asyncio.sleep(0.5)
+        # also exit if all pieces are actually done (endgame dedup can mismatch counter)
+        if all(p is not None for p in content_pieces):
+            break
     progress.display()
     print()  # newline after bar completes
 
@@ -153,12 +158,20 @@ async def download_all(sessions, piece_count, length, total_length):
     for i in range(piece_count):
         queue.put_nowait(i)
     
-    display_task = asyncio.create_task(progress_display(progress))
+    display_task = asyncio.create_task(progress_display(progress, content_pieces))
     endgame_task = asyncio.create_task(endgame_checker(content_pieces, queue, sessions, piece_count))
     tasks = [peer_worker(session, queue, length, total_length, content_pieces, progress) for session in sessions]
     await asyncio.gather(*tasks)
+    
+    # workers are done — stop background tasks and do final display
     endgame_task.cancel()
-    await display_task
+    display_task.cancel()
+    try:
+        await display_task
+    except asyncio.CancelledError:
+        pass
+    progress.display()
+    print()  # final newline
     return b"".join(content_pieces)
 async def main():
     command = sys.argv[1]
@@ -172,10 +185,39 @@ async def main():
         files, total_length = parse_file_info(content[b"info"])
         
         info_hash = calculate_info_hash(content)
-        all_peers = find_peers_auto(tracker=tracker, info_hash=info_hash, left=total_length)
+        
+        
+        trackers = []
+        if b"announce-list" in content:
+            for tier in content[b"announce-list"]:
+                for tracker_url in tier:
+                    trackers.append(tracker_url)
+            trackers.extend([content[b"announce"]])
+        else:
+            trackers = [content[b"announce"]]
+        
+        # query all trackers in parallel (5s timeout each)
+        all_peers = set()
+        def query_tracker(t):
+            return find_peers_auto(tracker=t, info_hash=info_hash, left=total_length)
+        
+        with ThreadPoolExecutor(max_workers=250) as executor:
+            futures = {executor.submit(query_tracker, t): t for t in trackers}
+            try:
+                for future in as_completed(futures, timeout=10):
+                    t = futures[future]
+                    try:
+                        peers = future.result(timeout=5)
+                        all_peers.update(peers)
+                    except Exception as e:
+                        print(f"tracker {t} failed: {e}")
+            except TimeoutError:
+                print(f"tracker discovery timed out, continuing with {len(all_peers)} peers found")
+        all_peers = list(all_peers)
+        print(f"found {len(all_peers)} unique peers from {len(trackers)} trackers")
 
         sessions = []
-        with ThreadPoolExecutor(max_workers=50) as executor:
+        with ThreadPoolExecutor(max_workers=250) as executor:
             futures = {
                 executor.submit(try_connect, peer, info_hash) : peer for peer in all_peers
             }
