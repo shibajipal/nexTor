@@ -2,10 +2,53 @@
 # this file consists of helper functions that help to find out the peer 
 
 
-
+import random
+import struct
+from urllib.parse import urlparse
 import bencodepy
 import requests
 import socket
+
+def find_udp_peers(tracker, info_hash, peer_id = "a"*20, port=6881, uploaded=0, downloaded=0, left=2**31-1):
+    parsed = urlparse(tracker)
+    HOST = parsed.hostname
+    
+    PORT = parsed.port or 6969
+    
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(5)
+    
+    transaction_id = random.randint(0, 2**32-1)
+    connect_request = struct.pack(">QII", 0x41727101980, 0, transaction_id)
+    sock.sendto(connect_request, (HOST, PORT))
+    response = sock.recv(16)
+    action, response_transaction_id, connection_id = struct.unpack(">IIQ", response)
+    
+    
+    transaction_id = random.randint(0, 2**32 - 1)
+    announce_request = struct.pack(">QII", connection_id, 1, transaction_id)
+    
+    announce_request += info_hash
+    announce_request += peer_id.encode()
+    announce_request += struct.pack(">QQQ", downloaded, left, uploaded)
+    announce_request += struct.pack(">IIIiH", 0, 0, random.randint(0, 2**32 - 1), -1, port)
+    sock.sendto(announce_request, (HOST, PORT))
+    response = sock.recv(4096)
+    sock.close()
+    
+    action, resp_tid, interval, leechers, seeders = struct.unpack(">IIIII", response[:20])
+    print(f"tracker: {tracker}, leechers: {leechers}, seeders: {seeders}")
+    
+    peer_data = response[20:]
+    all_peers = []
+    for i in range(0, len(peer_data), 6):
+        ip = ".".join(str(b) for b in peer_data[i:i+4])
+        
+        port = struct.unpack(">H", peer_data[i+4:i+6])[0]
+        all_peers.append(f"{ip}:{port}")
+    print(all_peers)
+    return all_peers
+
 def read_exactly(sock, n):
     data = b""
     while len(data) < n:
@@ -91,7 +134,12 @@ def find_peers(tracker,
     
     return all_peers
 
-
+def find_peers_auto(tracker, info_hash, **kwargs):
+    if tracker.startswith(b"udp://") or tracker.startswith("udp://"):
+        tracker_str = tracker.decode() if isinstance(tracker, bytes) else tracker
+        return find_udp_peers(tracker_str, info_hash, **kwargs)
+    else:
+        return find_peers(tracker, info_hash, **kwargs)
 
 
 
@@ -133,6 +181,9 @@ class PeerSession:
         self.bitfield_wait()
         self.interested_send()
         self.unchoke_wait()
+        
+        # use a longer timeout for data transfer (peers can be slow)
+        self.sock.settimeout(120)
         
         
         

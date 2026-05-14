@@ -3,16 +3,83 @@
 # usage:-  python client.py download_torrent <path> <torrent>
 import os
 import sys
+import time
 import socket
 import math
 import bencodepy
 import asyncio
-from downloader import download_piece
+from downloader import download_piece, ChokedError
 from parser import calculate_info_hash, parse_magnet_link, parse_torrent, parse_file_info
-from peer import read_exactly, tcp_handshake, extension_handshake, find_peers, PeerSession
-from concurrent.futures import ThreadPoolExecutor
+from peer import read_exactly, tcp_handshake, extension_handshake, find_peers, PeerSession, find_peers_auto
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-async def peer_worker(session, queue, length, total_length, content_pieces):
+
+class ProgressTracker:
+    def __init__(self, piece_count, piece_length, total_length):
+        self.piece_count = piece_count
+        self.piece_length = piece_length
+        self.total_length = total_length
+        self.completed_pieces = 0
+        self.bytes_downloaded = 0
+        self.start_time = time.time()
+    
+    def update(self, piece_bytes):
+        self.completed_pieces += 1
+        self.bytes_downloaded += piece_bytes
+    
+    def display(self):
+        elapsed = time.time() - self.start_time
+        downloaded = self.bytes_downloaded
+        percent = downloaded / self.total_length if self.total_length > 0 else 0
+        
+        speed = downloaded / elapsed if elapsed > 0 else 0
+        remaining = self.total_length - downloaded
+        eta = remaining / speed if speed > 0 else 0
+        
+        # format sizes
+        if self.total_length >= 1024 * 1024 * 1024:
+            dl_str = f"{downloaded / (1024**3):.2f}"
+            total_str = f"{self.total_length / (1024**3):.2f} GB"
+        elif self.total_length >= 1024 * 1024:
+            dl_str = f"{downloaded / (1024**2):.1f}"
+            total_str = f"{self.total_length / (1024**2):.1f} MB"
+        else:
+            dl_str = f"{downloaded / 1024:.0f}"
+            total_str = f"{self.total_length / 1024:.0f} KB"
+        
+        # format speed
+        if speed >= 1024 * 1024:
+            speed_str = f"{speed / (1024**2):.1f} MB/s"
+        else:
+            speed_str = f"{speed / 1024:.1f} KB/s"
+        
+        # format ETA
+        eta_min, eta_sec = divmod(int(eta), 60)
+        eta_hr, eta_min = divmod(eta_min, 60)
+        if eta_hr > 0:
+            eta_str = f"{eta_hr}h{eta_min:02d}m"
+        elif eta_min > 0:
+            eta_str = f"{eta_min}m{eta_sec:02d}s"
+        else:
+            eta_str = f"{eta_sec}s"
+        
+        # draw bar
+        bar_width = 30
+        filled = int(bar_width * percent)
+        bar = "█" * filled + "░" * (bar_width - filled)
+        
+        line = f"\r  [{bar}] {percent*100:5.1f}%  {dl_str}/{total_str}  {speed_str}  ETA {eta_str}  [{self.completed_pieces}/{self.piece_count} pieces]  "
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+
+def try_connect(peer_address, info_hash):
+    HOST, PORT = peer_address.split(":")
+    session = PeerSession(HOST, int(PORT), info_hash)
+    session.connect()
+    return session
+
+async def peer_worker(session, queue, length, total_length, content_pieces, progress):
     while True:
         try:
             piece_index = queue.get_nowait()
@@ -21,20 +88,49 @@ async def peer_worker(session, queue, length, total_length, content_pieces):
         
         if not session.has_piece(piece_index):
             queue.put_nowait(piece_index)
+            await asyncio.sleep(0)
             continue
         
-        loop = asyncio.get_event_loop()
-        buffer = await loop.run_in_executor(None, download_piece, session.sock, piece_index, length, total_length)
-        content_pieces[piece_index] = buffer
+        try:
+            loop = asyncio.get_event_loop()
+            buffer = await loop.run_in_executor(None, download_piece, session.sock, piece_index, length, total_length)
+            content_pieces[piece_index] = buffer
+            progress.update(len(buffer))
+        except ChokedError:
+            # peer choked us — put piece back for another peer (or retry later)
+            queue.put_nowait(piece_index)
+            # wait for unchoke before trying again
+            try:
+                while True:
+                    msg_id, _ = session.read_message()
+                    if msg_id == 1:  # unchoke
+                        break
+            except Exception:
+                return  # peer is dead, stop this worker
+        except Exception as e:
+            # timeout, disconnect, etc. — put piece back and retire this peer
+            queue.put_nowait(piece_index)
+            print(f"\npeer {session.host} failed: {e}")
+            return
         
+async def progress_display(progress):
+    while progress.completed_pieces < progress.piece_count:
+        progress.display()
+        await asyncio.sleep(0.5)
+    progress.display()
+    print()  # newline after bar completes
+
 async def download_all(sessions, piece_count, length, total_length):
     content_pieces = [None] * piece_count
     queue = asyncio.Queue()
+    progress = ProgressTracker(piece_count, length, total_length)
     for i in range(piece_count):
         queue.put_nowait(i)
-        
-    tasks = [peer_worker(session, queue, length, total_length, content_pieces) for session in sessions]
+    
+    display_task = asyncio.create_task(progress_display(progress))
+    tasks = [peer_worker(session, queue, length, total_length, content_pieces, progress) for session in sessions]
     await asyncio.gather(*tasks)
+    await display_task
     return b"".join(content_pieces)
 async def main():
     command = sys.argv[1]
@@ -48,25 +144,40 @@ async def main():
         files, total_length = parse_file_info(content[b"info"])
         
         info_hash = calculate_info_hash(content)
-        all_peers = find_peers(tracker=tracker, info_hash=info_hash, left=length)
+        all_peers = find_peers_auto(tracker=tracker, info_hash=info_hash, left=total_length)
 
         sessions = []
-        for p in all_peers:
-            HOST, PORT = p.split(":")
-            session = PeerSession(HOST, int(PORT), info_hash)
-            try:
-                session.connect()
-                sessions.append(session)
-                print(f"connected to {p}")
-            except Exception as e:
-                print(f"failed to connect to {p}: {e}")
-        if not sessions:
-            print(f"failed to connect to any peer")
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            futures = {
+                executor.submit(try_connect, peer, info_hash) : peer for peer in all_peers
+            }
+            
+            for future in as_completed(futures):
+                p = futures[future]
+                try:
+                    session = future.result()
+                    sessions.append(session)
+                    print(f"connected to {p}")
+                except Exception as e:
+                    print(f"failed to connect to {p}: {e}")
+        # for p in all_peers:
+        #     HOST, PORT = p.split(":")
+        #     session = PeerSession(HOST, int(PORT), info_hash)
+        #     try:
+        #         session.connect()
+        #         sessions.append(session)
+        #         print(f"connected to {p}")    
+        #     except Exception as e:
+        #         print(f"failed to connect to {p}: {e}")
+        # if not sessions:
+        #     print(f"failed to connect to any peer")
             
             
         total_content = b""
         piece_count = math.ceil(total_length / length)
-
+        print(f"there are {files} files in total and total length is {total_length}")
+        print(f"the info hash is {info_hash}")
+        print(f"there will be total {piece_count} pieces and each piece is {math.ceil(total_length / piece_count)}")
         
 
         total_content = await download_all(sessions, piece_count, length, total_length)

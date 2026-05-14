@@ -1,9 +1,14 @@
 # downloader.py
 # this file has the helper functions to download each piece of a torrent or magnet file
 from peer import read_exactly, tcp_handshake, PeerSession
+
+class ChokedError(Exception):
+    """Raised when a peer chokes us mid-download, discarding all pending requests."""
+    pass
+
 MAX_IN_FLIGHT = 5
 def download_piece(peer, piece_index, length, total_length):
-    print("downloading piece", piece_index)
+    # print("downloading piece", piece_index)
     
     buffer = b""
     begin = 0
@@ -39,9 +44,14 @@ def download_piece(peer, piece_index, length, total_length):
     while received_count < len(blocks):
         length_prefix = read_exactly(peer, 4)
         message_length = int.from_bytes(length_prefix, "big")
+        if message_length == 0:
+            continue  # keep-alive message, no body
         message_body = read_exactly(peer, message_length)
     
-        if message_body[0] == 7:
+        if message_body[0] == 0:
+            # choke — peer discarded all our pending requests
+            raise ChokedError(f"peer choked us during piece {piece_index}")
+        elif message_body[0] == 7:
             block_begin = int.from_bytes(message_body[1:5], "big")
             block_offset = int.from_bytes(message_body[5:9], "big")
             
@@ -56,12 +66,11 @@ def download_piece(peer, piece_index, length, total_length):
                 in_flight += 1
                 next_to_send += 1
         else:
-            # Non-piece message (have, keep-alive, etc.) — skip it
-            print("skipping message type", message_body[0])
+            # Non-piece message (unchoke, have, etc.) — skip it
             continue
     buffer = b""
     for begin, _ in blocks:
         buffer += received[begin]
-    print("downloading piece", piece_index,"done")
+    if piece_index % 50 == 0:
+        print("downloading piece", piece_index,"done")
     return buffer
-
