@@ -6,10 +6,8 @@ class ChokedError(Exception):
     """Raised when a peer chokes us mid-download, discarding all pending requests."""
     pass
 
-MAX_IN_FLIGHT = 5
-def download_piece(peer, piece_index, length, total_length):
-    # print("downloading piece", piece_index)
-    
+MAX_IN_FLIGHT = 20
+def download_piece(peer, piece_index, length, total_length, active_pieces=None):
     buffer = b""
     begin = 0
     block_length = 2 ** 14
@@ -32,6 +30,10 @@ def download_piece(peer, piece_index, length, total_length):
     next_to_send = 0
     received = {}
     
+    # register this piece as active
+    if active_pieces is not None:
+        active_pieces[piece_index] = (0, piece_size)
+    
     while next_to_send < len(blocks) and in_flight < MAX_IN_FLIGHT:
         begin, send_length = blocks[next_to_send]
         request = (13).to_bytes(4, "big") + (6).to_bytes(1, "big") + piece_index.to_bytes(4, "big") + begin.to_bytes(4, "big") + send_length.to_bytes(4, "big")
@@ -40,6 +42,7 @@ def download_piece(peer, piece_index, length, total_length):
         next_to_send += 1
         
     received_count = 0
+    received_bytes = 0
         
     while received_count < len(blocks):
         length_prefix = read_exactly(peer, 4)
@@ -50,6 +53,8 @@ def download_piece(peer, piece_index, length, total_length):
     
         if message_body[0] == 0:
             # choke — peer discarded all our pending requests
+            if active_pieces is not None and piece_index in active_pieces:
+                del active_pieces[piece_index]
             raise ChokedError(f"peer choked us during piece {piece_index}")
         elif message_body[0] == 7:
             block_begin = int.from_bytes(message_body[1:5], "big")
@@ -58,7 +63,13 @@ def download_piece(peer, piece_index, length, total_length):
             block_data = message_body[9:]
             received[block_offset] = block_data
             received_count += 1
+            received_bytes += len(block_data)
             in_flight -= 1
+            
+            # update per-piece progress
+            if active_pieces is not None:
+                active_pieces[piece_index] = (received_bytes, piece_size)
+            
             if next_to_send < len(blocks):
                 begin, send_length = blocks[next_to_send]
                 request = ((13).to_bytes(4, "big") + (6).to_bytes(1, "big")  + piece_index.to_bytes(4, "big") + begin.to_bytes(4, "big") + send_length.to_bytes(4, "big"))
@@ -68,9 +79,13 @@ def download_piece(peer, piece_index, length, total_length):
         else:
             # Non-piece message (unchoke, have, etc.) — skip it
             continue
+    
+    # piece done — remove from active display
+    if active_pieces is not None and piece_index in active_pieces:
+        del active_pieces[piece_index]
+    
     buffer = b""
     for begin, _ in blocks:
         buffer += received[begin]
-    if piece_index % 50 == 0:
-        print("downloading piece", piece_index,"done")
     return buffer
+

@@ -111,14 +111,22 @@ python client.py magnet_download ./downloads/file.iso "magnet:?xt=urn:btih:..."
 
 ```
 found 147 unique peers from 12 trackers
-connected to 85.214.42.193:51413
-connected to 192.168.1.45:6881
-...
 there are 1 files in total and total length is 4293652480
 the info hash is b'\xa3\xf2...'
 there will be total 16380 pieces and each piece is 262144
 
-  [████████████████░░░░░░░░░░░░░░]  53.2%  2.1/4.0 GB  3.8 MB/s  ETA 8m42s  [8714/16380 pieces]
+==============================================================================
+ubuntu-24.04-desktop-amd64.iso          [###################---------]  67.89%
+==============================================================================
+Speed         Min Speed     Avg Speed     Max Speed     ETA         Pieces      
+3.8 MB/s      0.0 KB/s      1.2 MB/s      5.1 MB/s      08m 42s     11120/16380 
+==============================================================================
+Top Peers in Swarm (Active: 45)
+1. 85.214.42.193:51413   | 1.2 MB/s   | Piece: 11121
+2. 192.168.1.45:6881     | 950.0 KB/s | Piece: 11122
+3. 10.0.0.5:49152        | 800.5 KB/s | Piece: 11125
+4. 172.16.0.12:6882      | 450.2 KB/s | Piece: 11130
+5. 93.184.216.34:50001   | 210.0 KB/s | Piece: 11131
 ```
 
 <br>

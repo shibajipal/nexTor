@@ -46,7 +46,7 @@ def find_udp_peers(tracker, info_hash, peer_id = "a"*20, port=6881, uploaded=0, 
         
         port = struct.unpack(">H", peer_data[i+4:i+6])[0]
         all_peers.append(f"{ip}:{port}")
-    print(all_peers)
+    # print(all_peers)
     return all_peers
 
 def read_exactly(sock, n):
@@ -68,7 +68,7 @@ def tcp_handshake(sock,
     else:
         reserved_bytes = b"\x00" * 8
     message = (19).to_bytes(1, "big") + "BitTorrent protocol".encode() + reserved_bytes + info_hash + peer_id.encode()
-    print(message)
+    # print(message)
     sock.send(message)
     data = read_exactly(sock, 68)
     received_peer_id = data[48:68].hex()
