@@ -1,13 +1,16 @@
 # downloader.py
 # this file has the helper functions to download each piece of a torrent or magnet file
 from peer import read_exactly, tcp_handshake, PeerSession
-
+from storage import TorrentStorage
 class ChokedError(Exception):
     """Raised when a peer chokes us mid-download, discarding all pending requests."""
     pass
 
+
 MAX_IN_FLIGHT = 20
-def download_piece(peer, piece_index, length, total_length, active_pieces=None):
+MAX_WRONG_BLOCKS = 5  # Give up if peer sends too many wrong pieces
+
+def download_piece(storage, peer, piece_index, length, total_length, active_pieces=None):
     buffer = b""
     begin = 0
     block_length = 2 ** 14
@@ -18,6 +21,7 @@ def download_piece(peer, piece_index, length, total_length, active_pieces=None):
         remaining_length = length
         piece_size = length
     
+    # storage = PieceStorage(path, total_length, piece_size)
     
     blocks = []
     offset = 0
@@ -28,7 +32,7 @@ def download_piece(peer, piece_index, length, total_length, active_pieces=None):
         
     in_flight = 0
     next_to_send = 0
-    received = {}
+    wrong_block_count = 0
     
     # register this piece as active
     if active_pieces is not None:
@@ -57,14 +61,25 @@ def download_piece(peer, piece_index, length, total_length, active_pieces=None):
                 del active_pieces[piece_index]
             raise ChokedError(f"peer choked us during piece {piece_index}")
         elif message_body[0] == 7:
-            block_begin = int.from_bytes(message_body[1:5], "big")
-            block_offset = int.from_bytes(message_body[5:9], "big")
+            block_index = int.from_bytes(message_body[1:5], "big")
+            block_begin = int.from_bytes(message_body[5:9], "big")
             
             block_data = message_body[9:]
-            received[block_offset] = block_data
-            received_count += 1
-            received_bytes += len(block_data)
-            in_flight -= 1
+            
+            # Validate the piece index matches what we requested
+            if block_index != piece_index:
+                # Peer sent us data for wrong piece
+                wrong_block_count += 1
+                if wrong_block_count > MAX_WRONG_BLOCKS:
+                    # Too many wrong blocks from this peer, give up
+                    raise ChokedError(f"peer sent too many wrong pieces (expected {piece_index}, got {block_index})")
+                in_flight -= 1
+            else:
+                wrong_block_count = 0  # Reset counter on correct block
+                storage.write_block(block_index, block_begin, block_data)
+                received_count += 1
+                received_bytes += len(block_data)
+                in_flight -= 1
             
             # update per-piece progress
             if active_pieces is not None:
@@ -84,8 +99,7 @@ def download_piece(peer, piece_index, length, total_length, active_pieces=None):
     if active_pieces is not None and piece_index in active_pieces:
         del active_pieces[piece_index]
     
-    buffer = b""
-    for begin, _ in blocks:
-        buffer += received[begin]
+    # read the piece back from storage to verify
+    buffer = storage.read_block(piece_index, 0, piece_size)
     return buffer
 

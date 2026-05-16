@@ -9,6 +9,8 @@ from urllib.parse import unquote
 
 
 def parse_torrent(file):
+    # Strip trailing slashes/backslashes from user input
+    file = file.rstrip('\\/')
     local_file_path = pathlib.Path(os.getcwd(), file)
     if local_file_path:
         # print("file found!")

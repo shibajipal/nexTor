@@ -9,6 +9,7 @@ import math
 import bencodepy
 import asyncio
 from downloader import download_piece, ChokedError
+from storage import TorrentStorage
 from parser import calculate_info_hash, parse_magnet_link, parse_torrent, parse_file_info
 from peer import read_exactly, tcp_handshake, extension_handshake, find_peers, PeerSession, find_peers_auto
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -157,8 +158,6 @@ class ProgressTracker:
                             if last_idx == idx:
                                 bytes_diff = recv - last_recv
                             else:
-                                # They finished the last piece and started a new one.
-                                # Give them credit for the tail end of the old piece!
                                 bytes_diff = max(0, last_total - last_recv) + recv
                                 
                             raw_speed = max(0, bytes_diff / p_dt)
@@ -218,12 +217,17 @@ async def endgame_checker(content_pieces, queue, sessions, piece_count):
                     queue.put_nowait(piece_index)
                     
 
-async def peer_worker(session, queue, length, total_length, content_pieces, progress):
+async def peer_worker(storage, session, queue, length, total_length, content_pieces, progress):
     while True:
         try:
             piece_index = queue.get_nowait()
         except asyncio.QueueEmpty:
-            return
+            # Check if all pieces are done before exiting
+            if all(p is not None for p in content_pieces):
+                return
+            # Queue is empty but pieces still downloading, wait a bit and retry
+            await asyncio.sleep(0.1)
+            continue
         
         
         if content_pieces[piece_index] is not None:
@@ -240,7 +244,7 @@ async def peer_worker(session, queue, length, total_length, content_pieces, prog
             loop = asyncio.get_event_loop()
             try:
                 buffer = await loop.run_in_executor(
-                    None, download_piece, session.sock, piece_index, length, total_length, progress.active_pieces
+                    None, download_piece, storage, session.sock, piece_index, length, total_length, progress.active_pieces
                 )
             finally:
                 if progress.active_peers.get(peer_id) == piece_index:
@@ -276,7 +280,8 @@ async def progress_display(progress):
         progress.display()
         await asyncio.sleep(0.3)
 
-async def download_all(sessions, piece_count, length, total_length, file_name="Download"):
+async def download_all(storage, sessions, piece_count, length, total_length, file_name="Download"):
+    print("test1")
     content_pieces = [None] * piece_count
     queue = asyncio.Queue()
     progress = ProgressTracker(piece_count, length, total_length, file_name)
@@ -285,7 +290,7 @@ async def download_all(sessions, piece_count, length, total_length, file_name="D
     
     display_task = asyncio.create_task(progress_display(progress))
     endgame_task = asyncio.create_task(endgame_checker(content_pieces, queue, sessions, piece_count))
-    tasks = [peer_worker(session, queue, length, total_length, content_pieces, progress) for session in sessions]
+    tasks = [peer_worker(storage, session, queue, length, total_length, content_pieces, progress) for session in sessions]
     await asyncio.gather(*tasks)
     
     # workers are done — stop background tasks and do final display
@@ -297,8 +302,13 @@ async def download_all(sessions, piece_count, length, total_length, file_name="D
         pass
     progress.active_pieces.clear()
     progress.display()
-    print()  # final newline
-    return b"".join(content_pieces)
+    print("test")  # final newline
+    
+    # Close all file handles to ensure data is flushed to disk
+    storage.close_all()
+    
+    return 1
+    # return b"".join(content_pieces)
 async def main():
     command = sys.argv[1]
     if command == "download_torrent":
@@ -326,7 +336,6 @@ async def main():
         all_peers = set()
         def query_tracker(t):
             return find_peers_auto(tracker=t, info_hash=info_hash, left=total_length)
-        
         with ThreadPoolExecutor(max_workers=250) as executor:
             futures = {executor.submit(query_tracker, t): t for t in trackers}
             try:
@@ -356,51 +365,30 @@ async def main():
                     print(f"connected to {p}")
                 except Exception as e:
                     print(f"failed to connect to {p}: {e}")
-        # print(f"sessions: {sessions}")
-        # for p in all_peers:
-        #     HOST, PORT = p.split(":")
-        #     session = PeerSession(HOST, int(PORT), info_hash)
-        #     try:
-        #         session.connect()
-        #         sessions.append(session)
-        #         print(f"connected to {p}")    
-        #     except Exception as e:
-        #         print(f"failed to connect to {p}: {e}")
-        # if not sessions:
-        #     print(f"failed to connect to any peer")
-            
+        print(f"sessions: {sessions}")
+
             
         total_content = b""
         piece_count = math.ceil(total_length / length)
+        # For multi-file torrents, use full download_path; for single-file, use dirname
+        if len(files) > 1:
+            download_dir = download_path
+        else:
+            download_dir = os.path.dirname(download_path) if os.path.dirname(download_path) else "."
+        storage = TorrentStorage(download_dir, files, length)
         print(f"there are {len(files)} files in total and total length is {total_length}")
         print(f"the info hash is {info_hash}")
-        print(f"there will be total {piece_count} pieces and each piece is {math.ceil(total_length / piece_count)}")
+        print(f"there will be total {piece_count} pieces and each piece is {length}")
+        print(f"saving to directory: {download_dir}")
         
         torrent_name = content[b"info"].get(b"name", b"").decode("utf-8", "replace")
         if not torrent_name:
             torrent_name = os.path.basename(file)
 
-        total_content = await download_all(sessions, piece_count, length, total_length, torrent_name)
-        # for i in content_pieces:
-        #     total_content += i
-        
-        if len(files) == 1:
-            with open(download_path, "wb") as f:
-                f.write(total_content)
-        else:
-            offset = 0
-            for file_path, file_length in files:
-                output_path = os.path.join(download_path, file_path)
-                os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                file_data = total_content[offset : offset + file_length]
-                with open(output_path, "wb") as f:
-                    f.write(file_data)
-                    
-                print(f"written: {file_path} ({file_length}) bytes")
-                offset += file_length
-            
-            
+        val = await download_all(storage, sessions, piece_count, length, total_length, torrent_name)
+
     elif command == "magnet_download":
+        ### this is unusuable at the moment, will fix it later!
         download_path = sys.argv[2]
         magnet_link = sys.argv[3]
         info_hash, tracker = parse_magnet_link(magnet_link)
@@ -446,6 +434,7 @@ async def main():
                 break
         
         total_content = b""
+        
         for piece_index in range(0, math.ceil(total_length / piece_length)):
             buffer = download_piece(peer, piece_index, piece_length, total_length)
             total_content += buffer
