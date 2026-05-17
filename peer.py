@@ -156,12 +156,13 @@ def find_peers_auto(tracker, info_hash, **kwargs):
 
 class PeerSession:
 
-    def __init__(self, host, port, info_hash, peer_id = "a"*20):
+    def __init__(self, host, port, info_hash, peer_id = "a"*20, is_magnet=False):
 
         self.host = host
         self.port = port
         self.info_hash = info_hash
         self.peer_id = peer_id
+        self.is_magnet = is_magnet
         self.sock = None
         self.remote_peer_id = None                 
         self.bitfield = None
@@ -175,9 +176,11 @@ class PeerSession:
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port), timeout=10)
         
+        handshake_type = "magnet" if self.is_magnet else "torrent"
         self.remote_peer_id = tcp_handshake(sock=self.sock,
                                             info_hash=self.info_hash,
-                                            peer_id=self.peer_id)
+                                            peer_id=self.peer_id,
+                                            type=handshake_type)
         self.bitfield_wait()
         self.interested_send()
         self.unchoke_wait()
@@ -213,14 +216,29 @@ class PeerSession:
             self.sock = None
         
     def bitfield_wait(self):
-        while True:
-            msg_id, payload = self.read_message()
-            if msg_id == 5:
-                self.bitfield = payload
-                break
-            
-            elif msg_id == 4:
-                pass
+        # We wait for a short time for bitfield. If we get other messages like HAVE (4), UNCHOKE (1),
+        # or EXTENSION (20), we process them but we might exit the bitfield loop if it's clear 
+        # the bitfield phase is over.
+        self.sock.settimeout(2.0)
+        try:
+            while True:
+                msg_id, payload = self.read_message()
+                if msg_id == 5:
+                    self.bitfield = payload
+                    break
+                elif msg_id == 20:
+                    if payload and payload[0] == 0:
+                        peer_ext_handshake = bencodepy.decode(payload[1:])
+                        if b"m" in peer_ext_handshake and b"ut_metadata" in peer_ext_handshake[b"m"]:
+                            self.peer_metadata_id = peer_ext_handshake[b"m"][b"ut_metadata"]
+                elif msg_id in (1, 4):
+                    # Peer sent unchoke or have, meaning they skipped bitfield (likely no pieces)
+                    break
+        except socket.timeout:
+            # Peer didn't send bitfield in time, probably has no pieces or is silent
+            pass
+        finally:
+            self.sock.settimeout(10.0) # restore default timeout
             
     def interested_send(self):
         msg = (1).to_bytes(4, "big") + (2).to_bytes(1, "big")
@@ -228,9 +246,21 @@ class PeerSession:
         self.is_interested = True
         
     def unchoke_wait(self):
-        while True:
-            msg_id, payload = self.read_message()
-            if msg_id == 1:
-                self.peer_choking = False
-                break
+        # We don't block forever, just wait a bit for unchoke
+        self.sock.settimeout(2.0)
+        try:
+            while True:
+                msg_id, payload = self.read_message()
+                if msg_id == 1:
+                    self.peer_choking = False
+                    break
+                elif msg_id == 20:
+                    if payload and payload[0] == 0:
+                        peer_ext_handshake = bencodepy.decode(payload[1:])
+                        if b"m" in peer_ext_handshake and b"ut_metadata" in peer_ext_handshake[b"m"]:
+                            self.peer_metadata_id = peer_ext_handshake[b"m"][b"ut_metadata"]
+        except socket.timeout:
+            pass
+        finally:
+            self.sock.settimeout(120.0)
                 

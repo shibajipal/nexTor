@@ -28,10 +28,9 @@ def calculate_info_hash(content):
 
 def parse_magnet_link(magnet_link):
     info_hash = magnet_link[20:60]
-    # print(magnet_link.split("&tr="))
-    tracker = magnet_link.split("&tr=")[-1]
-    tracker = unquote(tracker)
-    return (info_hash, tracker)
+    parts = magnet_link.split("&tr=")
+    trackers = [unquote(t.split("&")[0]) for t in parts[1:]]
+    return (info_hash, trackers)
 
 def parse_file_info(info):
     if b"files" in info:

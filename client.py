@@ -73,7 +73,10 @@ class ProgressTracker:
 
     def display(self):
         elapsed = time.time() - self.start_time
-        downloaded = self.bytes_downloaded
+        
+        active_bytes = sum(recv for recv, _ in list(self.active_pieces.values()))
+        downloaded = self.bytes_downloaded + active_bytes
+        
         percent = downloaded / self.total_length if self.total_length > 0 else 0
 
         avg_speed = downloaded / elapsed if elapsed > 0 else 0
@@ -391,56 +394,107 @@ async def main():
         ### this is unusuable at the moment, will fix it later!
         download_path = sys.argv[2]
         magnet_link = sys.argv[3]
-        info_hash, tracker = parse_magnet_link(magnet_link)
+        info_hash, trackers = parse_magnet_link(magnet_link)
         info_hash = bytes.fromhex(info_hash)
-        all_peers = find_peers(tracker=tracker, info_hash=info_hash, left=10)
-        p = all_peers[0]
-        HOST, PORT = p.split(":")
-        peer = socket.create_connection((HOST, PORT))
+        
+        # query all trackers in parallel to find peers (5s timeout each)
+        all_peers = set()
+        def query_tracker(t):
+            return find_peers_auto(tracker=t, info_hash=info_hash, left=10)
+        with ThreadPoolExecutor(max_workers=250) as executor:
+            futures = {executor.submit(query_tracker, t): t for t in trackers}
+            try:
+                for future in as_completed(futures, timeout=10):
+                    t = futures[future]
+                    try:
+                        peers = future.result(timeout=5)
+                        all_peers.update(peers)
+                    except Exception as e:
+                        print(f"tracker {t} failed: {e}")
+            except TimeoutError:
+                print(f"tracker discovery timed out, continuing with {len(all_peers)} peers found")
+        all_peers = list(all_peers)
+        print(f"found {len(all_peers)} unique peers from {len(trackers)} trackers")
+        
+        if not all_peers:
+            raise Exception("Could not find any peers from the provided magnet trackers.")
+            
+        # Race to fetch metadata from any of these peers
+        info = None
+        def fetch_metadata_from_peer(p_addr):
+            HOST, PORT = p_addr.split(":")
+            peer = socket.create_connection((HOST, int(PORT)), timeout=5)
+            tcp_handshake(sock=peer, info_hash=info_hash, type="magnet")
+            peer_metadata_id = extension_handshake(peer)
+            
+            request_payload = bencodepy.encode({b"msg_type": 0, b"piece": 0})
+            request_msg = (len(request_payload) + 2).to_bytes(4, "big") + (20).to_bytes(1, "big") + int(peer_metadata_id).to_bytes(1, "big") + request_payload
+            peer.send(request_msg)
+            
+            while True:
+                length_prefix = read_exactly(peer, 4)
+                message_length = int.from_bytes(length_prefix, "big")
+                message_body = read_exactly(peer, message_length)
+                if message_body[0] == 20:
+                    payload = message_body[2:]
+                    dict_end = payload.index(b"ee") + 2
+                    raw_info = payload[dict_end:]
+                    info_dict = bencodepy.decode(raw_info)
+                    peer.close()
+                    return info_dict
 
-        received_peer_id = tcp_handshake(sock=peer, info_hash=info_hash, type="magnet")
-        peer_metadata_id = extension_handshake(peer)
-        
-        # request metadata piece (msg_type=0 means request, piece=0)
-        request_payload = bencodepy.encode({b"msg_type": 0, b"piece": 0})
-        request_msg = (len(request_payload) + 2).to_bytes(4, "big") + (20).to_bytes(1, "big") + int(peer_metadata_id).to_bytes(1, "big") + request_payload
-        peer.send(request_msg)
-        
-        # receive metadata piece response
-        while True:
-            length_prefix = read_exactly(peer, 4)
-            message_length = int.from_bytes(length_prefix, "big")
-            message_body = read_exactly(peer, message_length)
-            if message_body[0] == 20:
-                payload = message_body[2:]
-                # response is: bencoded dict + raw info dict bytes
-                # find end of bencoded dict by decoding it
-                dict_end = payload.index(b"ee") + 2
-                raw_info = payload[dict_end:]
-                info = bencodepy.decode(raw_info)
-                break
-        total_length = info[b"length"]
-        piece_length = info[b"piece length"]
+        print("Fetching metadata from peers in parallel...")
+        with ThreadPoolExecutor(max_workers=250) as executor:
+            futures = {executor.submit(fetch_metadata_from_peer, p): p for p in all_peers}
+            for future in as_completed(futures):
+                try:
+                    info = future.result()
+                    print(f"Successfully fetched metadata!")
+                    break
+                except Exception:
+                    pass
+                    
+        if not info:
+            raise Exception("Could not fetch metadata from any peer.")
+            
+        length = info[b"piece length"]
+        files, total_length = parse_file_info(info)
 
-        interested_message = (1).to_bytes(4, "big") + (2).to_bytes(1, "big")
-        print("interested message", interested_message)
-        peer.send(interested_message)
-        while True:
-            length_prefix = read_exactly(peer, 4)
-            message_length = int.from_bytes(length_prefix, "big")
-            unchoke_body = read_exactly(peer, message_length)
-            print("unchoke body", unchoke_body)
-            if unchoke_body[0] == 1:
-                break
-        
+        sessions = []
+        with ThreadPoolExecutor(max_workers=250) as executor:
+            futures = {
+                executor.submit(try_connect, p_addr, info_hash) : p_addr for p_addr in all_peers
+            }
+            
+            for future in as_completed(futures):
+                p_addr = futures[future]
+                try:
+                    session = future.result()
+                    sessions.append(session)
+                    print(f"connected to {p_addr}")
+                except Exception as e:
+                    print(f"failed to connect to {p_addr}: {e}")
+        print(f"sessions: {sessions}")
+
+            
         total_content = b""
+        piece_count = math.ceil(total_length / length)
+        # For multi-file torrents, use full download_path; for single-file, use dirname
+        if len(files) > 1:
+            download_dir = download_path
+        else:
+            download_dir = os.path.dirname(download_path) if os.path.dirname(download_path) else "."
+        storage = TorrentStorage(download_dir, files, length)
+        print(f"there are {len(files)} files in total and total length is {total_length}")
+        print(f"the info hash is {info_hash}")
+        print(f"there will be total {piece_count} pieces and each piece is {length}")
+        print(f"saving to directory: {download_dir}")
         
-        for piece_index in range(0, math.ceil(total_length / piece_length)):
-            buffer = download_piece(peer, piece_index, piece_length, total_length)
-            total_content += buffer
-            print("total content", len(total_content))
-        with open(download_path, "wb") as f:
-            f.write(total_content)
+        torrent_name = info.get(b"name", b"").decode("utf-8", "replace")
+        if not torrent_name:
+            torrent_name = os.path.basename(download_path)
+
+        val = await download_all(storage, sessions, piece_count, length, total_length, torrent_name)
     else:
         raise NotImplementedError(f"Unknown command {command}")
         
