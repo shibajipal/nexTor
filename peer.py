@@ -130,7 +130,7 @@ def find_peers(tracker,
     elif isinstance(p, list):
         for i in p:
             all_peers.append(i[b'ip'].decode() + ":" + str(i[b'port']))
-    print(all_peers)
+    # print(all_peers)
     
     return all_peers
 

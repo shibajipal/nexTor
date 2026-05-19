@@ -6,6 +6,7 @@ import sys
 import time
 import socket
 import math
+import hashlib
 import bencodepy
 import asyncio
 from downloader import download_piece, ChokedError
@@ -76,21 +77,19 @@ class ProgressTracker:
         elapsed = current_time - self.start_time
         
         active_bytes = sum(recv for recv, _ in list(self.active_pieces.values()))
-
         committed = self.bytes_downloaded
         downloaded = committed + active_bytes
-        
 
-        percent = min(1.0, downloaded / self.total_length) if self.total_length > 0 else 0
+        percent = min(1.0, committed / self.total_length) if self.total_length > 0 else 0
 
 
         avg_speed = committed / elapsed if elapsed > 0 else 0
-        remaining = self.total_length - committed
+        remaining = max(0, self.total_length - committed)
         eta = remaining / avg_speed if avg_speed > 0 else 0
 
         dt = current_time - self._last_time
         if dt >= 0.3:
-            raw_speed = (downloaded - self._last_downloaded) / dt
+            raw_speed = max(0.0, (downloaded - self._last_downloaded) / dt)
 
             if self._current_speed > 0:
                 self._current_speed = 0.6 * raw_speed + 0.4 * self._current_speed
@@ -224,7 +223,7 @@ async def endgame_checker(content_pieces, queue, sessions, piece_count):
             return  # all done, nothing to do
         if len(remaining) <= threshold:
             triggered = True
-            print("ENDGAME MODE BABY!")
+            # print("ENDGAME MODE BABY!")
             for piece_index in remaining:
                 for _ in sessions:
                     queue.put_nowait(piece_index)
@@ -309,7 +308,7 @@ async def completion_monitor(content_pieces, sessions):
             return
 
 async def download_all(storage, sessions, piece_count, length, total_length, file_name="Download"):
-    print("test1")
+    # print("test1")
     content_pieces = [None] * piece_count
     queue = asyncio.Queue()
     progress = ProgressTracker(piece_count, length, total_length, file_name)
@@ -332,10 +331,9 @@ async def download_all(storage, sessions, piece_count, length, total_length, fil
         pass
     progress.active_pieces.clear()
     progress.display()
-    print("test")  # final newline
+    # print("test")  # final newline
     
-    # Close all file handles to ensure data is flushed to disk
-    storage.close_all()
+    storage.flush_all()
     
     return 1
     # return b"".join(content_pieces)
@@ -366,7 +364,7 @@ async def main():
         all_peers = set()
         def query_tracker(t):
             return find_peers_auto(tracker=t, info_hash=info_hash, left=total_length)
-        with ThreadPoolExecutor(max_workers=250) as executor:
+        with ThreadPoolExecutor(max_workers=max(250, len(trackers))) as executor:
             futures = {executor.submit(query_tracker, t): t for t in trackers}
             try:
                 for future in as_completed(futures, timeout=10):
@@ -375,14 +373,16 @@ async def main():
                         peers = future.result(timeout=5)
                         all_peers.update(peers)
                     except Exception as e:
-                        print(f"tracker {t} failed: {e}")
+                        """tracker failed"""
+                        # print(f"tracker {t} failed: {e}")
             except TimeoutError:
-                print(f"tracker discovery timed out, continuing with {len(all_peers)} peers found")
+                """tracker timeout"""
+                # print(f"tracker discovery timed out, continuing with {len(all_peers)} peers found")
         all_peers = list(all_peers)
-        print(f"found {len(all_peers)} unique peers from {len(trackers)} trackers")
+        # print(f"found {len(all_peers)} unique peers from {len(trackers)} trackers")
 
         sessions = []
-        with ThreadPoolExecutor(max_workers=250) as executor:
+        with ThreadPoolExecutor(max_workers=max(250, len(all_peers))) as executor:
             futures = {
                 executor.submit(try_connect, peer, info_hash) : peer for peer in all_peers
             }
@@ -392,13 +392,15 @@ async def main():
                 try:
                     session = future.result()
                     sessions.append(session)
-                    print(f"connected to {p}")
+                    # print(f"connected to {p}")
                 except Exception as e:
-                    print(f"failed to connect to {p}: {e}")
-        print(f"sessions: {sessions}")
+                    """connection failed"""
+                    # print(f"failed to connect to {p}: {e}")
+                    
+        # print(f"sessions: {sessions}")
 
-            
         total_content = b""
+            
         piece_count = math.ceil(total_length / length)
         # For multi-file torrents, use full download_path; for single-file, use dirname
         if len(files) > 1:
@@ -417,6 +419,27 @@ async def main():
 
         val = await download_all(storage, sessions, piece_count, length, total_length, torrent_name)
 
+        print("\nVERIFYING SHA1 HASHES...")
+        pieces_hash = content[b"info"][b"pieces"]
+        failed = []
+        for i in range(piece_count):
+            expected = pieces_hash[i * 20 : (i + 1) * 20]
+            if i == piece_count - 1:
+                piece_size = total_length - (i * length)
+            else:
+                piece_size = length
+            data = storage.read_block(i, 0, piece_size)
+            actual = hashlib.sha1(data).digest()
+            if actual != expected:
+                failed.append(i)
+        if failed:
+            print(f"SHA1 VERIFICATION FAILED FOR {len(failed)} PIECE(S): {failed}")
+        else:
+            print(f"SHA1 VERIFICATION PASSED - ALL {piece_count} PIECES OK")
+        print("DOWNLOAD COMPLETED")
+        print(f"SAVED IN {os.path.abspath(download_dir)}")
+        storage.close_all()
+
     elif command == "magnet_download":
         ### this is unusuable at the moment, will fix it later!
         download_path = sys.argv[2]
@@ -424,7 +447,6 @@ async def main():
         info_hash, trackers = parse_magnet_link(magnet_link)
         info_hash = bytes.fromhex(info_hash)
         
-        # query all trackers in parallel to find peers (5s timeout each)
         all_peers = set()
         def query_tracker(t):
             return find_peers_auto(tracker=t, info_hash=info_hash, left=10)
@@ -437,16 +459,17 @@ async def main():
                         peers = future.result(timeout=5)
                         all_peers.update(peers)
                     except Exception as e:
-                        print(f"tracker {t} failed: {e}")
+                        """tracker failed"""
+                        # print(f"tracker {t} failed: {e}")
             except TimeoutError:
-                print(f"tracker discovery timed out, continuing with {len(all_peers)} peers found")
+                """tracker timeout"""
+                # print(f"tracker discovery timed out, continuing with {len(all_peers)} peers found")
         all_peers = list(all_peers)
-        print(f"found {len(all_peers)} unique peers from {len(trackers)} trackers")
+        # print(f"found {len(all_peers)} unique peers from {len(trackers)} trackers")
         
         if not all_peers:
             raise Exception("Could not find any peers from the provided magnet trackers.")
             
-        # Race to fetch metadata from any of these peers
         info = None
         def fetch_metadata_from_peer(p_addr):
             HOST, PORT = p_addr.split(":")
@@ -470,13 +493,13 @@ async def main():
                     peer.close()
                     return info_dict
 
-        print("Fetching metadata from peers in parallel...")
+        # print("Fetching metadata from peers in parallel...")
         with ThreadPoolExecutor(max_workers=250) as executor:
             futures = {executor.submit(fetch_metadata_from_peer, p): p for p in all_peers}
             for future in as_completed(futures):
                 try:
                     info = future.result()
-                    print(f"Successfully fetched metadata!")
+                    # print(f"Successfully fetched metadata!")
                     break
                 except Exception:
                     pass
@@ -498,15 +521,15 @@ async def main():
                 try:
                     session = future.result()
                     sessions.append(session)
-                    print(f"connected to {p_addr}")
+                    # print(f"connected to {p_addr}")
                 except Exception as e:
-                    print(f"failed to connect to {p_addr}: {e}")
-        print(f"sessions: {sessions}")
+                    """connection failed"""
+                    # print(f"failed to connect to {p_addr}: {e}")
+        # print(f"sessions: {sessions}")
 
             
         total_content = b""
         piece_count = math.ceil(total_length / length)
-        # For multi-file torrents, use full download_path; for single-file, use dirname
         if len(files) > 1:
             download_dir = download_path
         else:
@@ -522,6 +545,27 @@ async def main():
             torrent_name = os.path.basename(download_path)
 
         val = await download_all(storage, sessions, piece_count, length, total_length, torrent_name)
+
+        print("\nVERIFYING SHA1 HASHES...")
+        pieces_hash = info[b"pieces"]
+        failed = []
+        for i in range(piece_count):
+            expected = pieces_hash[i * 20 : (i + 1) * 20]
+            if i == piece_count - 1:
+                piece_size = total_length - (i * length)
+            else:
+                piece_size = length
+            data = storage.read_block(i, 0, piece_size)
+            actual = hashlib.sha1(data).digest()
+            if actual != expected:
+                failed.append(i)
+        if failed:
+            print(f"SHA1 VERIFICATION FAILED FOR {len(failed)} PIECE(S): {failed}")
+        else:
+            print(f"SHA1 VERIFICATION PASSED - ALL {piece_count} PIECES OK")
+        print("DOWNLOAD COMPLETED")
+        print(f"SAVED IN {os.path.abspath(download_dir)}")
+        storage.close_all()
     else:
         raise NotImplementedError(f"Unknown command {command}")
         
