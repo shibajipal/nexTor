@@ -12,9 +12,9 @@ A minimal implementation of the BitTorrent protocol using raw sockets and asynci
 
 ---
 
-https://github.com/user-attachments/assets/nextor-demo
-
-*👆 Click to watch the terminal demo*
+<video src="assets/nextor%20demo%20github.mp4" width="700" autoplay loop muted playsinline>
+  Your browser does not support the video tag.
+</video>
 
 </div>
 
@@ -138,7 +138,7 @@ Top Peers in Swarm (Active: 45)
 ### The Download Lifecycle
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/shibajipal/nexTor/main/assets/download_lifecycle.png" alt="Download Lifecycle" width="800">
+  <img src="assets/download_lifecycle.png" alt="Download Lifecycle" width="800">
 </p>
 
 ---
@@ -199,7 +199,7 @@ Downloaded blocks are assembled into pieces, and pieces are concatenated into th
 ## Architecture
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/shibajipal/nexTor/main/assets/architecture.png" alt="Architecture" width="700">
+  <img src="assets/architecture.png" alt="Architecture" width="700">
 </p>
 
 <br>
