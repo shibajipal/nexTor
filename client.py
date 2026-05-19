@@ -72,28 +72,38 @@ class ProgressTracker:
         return f"{speed / 1024:.1f} KB/s"
 
     def display(self):
-        elapsed = time.time() - self.start_time
+        current_time = time.time()
+        elapsed = current_time - self.start_time
         
         active_bytes = sum(recv for recv, _ in list(self.active_pieces.values()))
-        downloaded = self.bytes_downloaded + active_bytes
-        
-        percent = downloaded / self.total_length if self.total_length > 0 else 0
 
-        avg_speed = downloaded / elapsed if elapsed > 0 else 0
-        remaining = self.total_length - downloaded
+        committed = self.bytes_downloaded
+        downloaded = committed + active_bytes
+        
+
+        percent = min(1.0, downloaded / self.total_length) if self.total_length > 0 else 0
+
+
+        avg_speed = committed / elapsed if elapsed > 0 else 0
+        remaining = self.total_length - committed
         eta = remaining / avg_speed if avg_speed > 0 else 0
 
-        current_time = time.time()
         dt = current_time - self._last_time
-        if dt >= 0.5:
-            self._current_speed = (downloaded - self._last_downloaded) / dt
+        if dt >= 0.3:
+            raw_speed = (downloaded - self._last_downloaded) / dt
+
+            if self._current_speed > 0:
+                self._current_speed = 0.6 * raw_speed + 0.4 * self._current_speed
+            else:
+                self._current_speed = raw_speed
             self._last_downloaded = downloaded
             self._last_time = current_time
             
-            if self._current_speed > 0 and self._current_speed < self.min_speed:
-                self.min_speed = self._current_speed
-            if self._current_speed > self.max_speed:
-                self.max_speed = self._current_speed
+            if self._current_speed > 0:
+                if self._current_speed < self.min_speed:
+                    self.min_speed = self._current_speed
+                if self._current_speed > self.max_speed:
+                    self.max_speed = self._current_speed
 
         speed_str = self._format_speed(self._current_speed)
         avg_speed_str = self._format_speed(avg_speed)
@@ -111,7 +121,7 @@ class ProgressTracker:
 
         # ── overall progress UI ──
         bar_w = 30
-        filled = int(bar_w * percent)
+        filled = min(bar_w, int(bar_w * percent))  # clamp to prevent overflow
         bar = f"{'#' * filled}{'-' * (bar_w - filled)}"
         
         lines.append(f"{self.CYAN}{'=' * 78}{self.RESET}")
@@ -273,8 +283,9 @@ async def peer_worker(storage, session, queue, length, total_length, content_pie
             except Exception:
                 return  # peer is dead or timed out, stop this worker
         except Exception as e:
-            # timeout, disconnect, etc. — put piece back and retire this peer
-            queue.put_nowait(piece_index)
+            # timeout, disconnect, etc. — put piece back only if not yet completed
+            if content_pieces[piece_index] is None:
+                queue.put_nowait(piece_index)
             # print(f"\npeer {session.host} failed: {e}")
             return
         
@@ -282,6 +293,20 @@ async def progress_display(progress):
     while progress.completed_pieces < progress.piece_count:
         progress.display()
         await asyncio.sleep(0.3)
+
+async def completion_monitor(content_pieces, sessions):
+   
+    while True:
+        await asyncio.sleep(0.5)
+        if all(p is not None for p in content_pieces):
+            # All pieces confirmed downloaded — kill sockets so any blocked
+            # read_exactly calls in executor threads raise OSError and exit.
+            for session in sessions:
+                try:
+                    session.sock.close()
+                except Exception:
+                    pass
+            return
 
 async def download_all(storage, sessions, piece_count, length, total_length, file_name="Download"):
     print("test1")
@@ -293,8 +318,10 @@ async def download_all(storage, sessions, piece_count, length, total_length, fil
     
     display_task = asyncio.create_task(progress_display(progress))
     endgame_task = asyncio.create_task(endgame_checker(content_pieces, queue, sessions, piece_count))
+    monitor_task = asyncio.create_task(completion_monitor(content_pieces, sessions))
     tasks = [peer_worker(storage, session, queue, length, total_length, content_pieces, progress) for session in sessions]
     await asyncio.gather(*tasks)
+    monitor_task.cancel()  # cancel if workers finished before monitor fired
     
     # workers are done — stop background tasks and do final display
     endgame_task.cancel()
