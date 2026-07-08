@@ -475,23 +475,42 @@ async def main():
             HOST, PORT = p_addr.split(":")
             peer = socket.create_connection((HOST, int(PORT)), timeout=5)
             tcp_handshake(sock=peer, info_hash=info_hash, type="magnet")
-            peer_metadata_id = extension_handshake(peer)
+            peer_metadata_id, metadata_size = extension_handshake(peer)
             
-            request_payload = bencodepy.encode({b"msg_type": 0, b"piece": 0})
-            request_msg = (len(request_payload) + 2).to_bytes(4, "big") + (20).to_bytes(1, "big") + int(peer_metadata_id).to_bytes(1, "big") + request_payload
-            peer.send(request_msg)
-            
-            while True:
-                length_prefix = read_exactly(peer, 4)
-                message_length = int.from_bytes(length_prefix, "big")
-                message_body = read_exactly(peer, message_length)
-                if message_body[0] == 20:
-                    payload = message_body[2:]
-                    dict_end = payload.index(b"ee") + 2
-                    raw_info = payload[dict_end:]
-                    info_dict = bencodepy.decode(raw_info)
-                    peer.close()
-                    return info_dict
+            if metadata_size <= 0:
+                peer.close()
+                raise Exception("no metadata")
+
+            piece_count = math.ceil(metadata_size / 16384)
+            metadata_pieces = [None] * piece_count
+
+            for piece in range(piece_count):
+                request_payload = bencodepy.encode({b"msg_type": 0, b"piece": piece})
+                request_msg = (len(request_payload) + 2).to_bytes(4, "big") + (20).to_bytes(1, "big") + int(peer_metadata_id).to_bytes(1, "big") + request_payload
+                peer.send(request_msg)
+                
+                while True:
+                    length_prefix = read_exactly(peer, 4)
+                    message_length = int.from_bytes(length_prefix, "big")
+                    message_body = read_exactly(peer, message_length)
+                    if message_body[0] == 20:
+                        payload = message_body[2:]
+                        response_dict = bencodepy.decode(payload)
+                        dict_len = len(bencodepy.encode(response_dict))
+
+                        if response_dict[b"msg_type"] == 2:
+                            peer.close()
+                            raise Exception("rejected")
+                        
+                        if response_dict[b"msg_type"] == 1:
+                            raw_piece = payload[dict_len:]
+                            metadata_pieces[piece] = raw_piece
+                            break
+
+            peer.close()
+            full_metadata = b"".join(metadata_pieces)
+            info_dict = bencodepy.decode(full_metadata)
+            return info_dict
 
         # print("Fetching metadata from peers in parallel...")
         with ThreadPoolExecutor(max_workers=250) as executor:

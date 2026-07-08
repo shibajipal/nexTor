@@ -90,8 +90,9 @@ def extension_handshake(peer):
         if message_body[0] == 20 and message_body[1] == 0:
             peer_ext_handshake = bencodepy.decode(message_body[2:])
             peer_metadata_id = peer_ext_handshake[b"m"][b"ut_metadata"]
+            metadata_size = peer_ext_handshake.get(b"metadata_size", 0)
             break
-    return peer_metadata_id
+    return peer_metadata_id, metadata_size
 
 def find_peers(tracker,
                info_hash,
