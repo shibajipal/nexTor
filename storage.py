@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 
 class TorrentStorage:
@@ -7,7 +8,7 @@ class TorrentStorage:
         self.root_path = root
         self.piece_length = piece_length
         self.lock = threading.Lock() #i think this somehow made it work!
-        
+         
         self.files = []
         self.completed = set()
         
@@ -18,8 +19,21 @@ class TorrentStorage:
             parent_dir = os.path.dirname(full_path)
             if parent_dir:  # only create if parent_dir is not empty
                 os.makedirs(parent_dir, exist_ok=True)
-            f = open(full_path, "w+b")
-            f.truncate(length)
+            if os.path.exists(full_path):
+                f = open(full_path, "r+b")
+            else:
+                f = open(full_path, "w+b")
+            if sys.platform == "win32":
+                try:
+                    import msvcrt
+                    import ctypes
+                    handle = msvcrt.get_osfhandle(f.fileno())
+                    ctypes.windll.kernel32.DeviceIoControl(
+                        ctypes.wintypes.HANDLE(handle), ctypes.wintypes.DWORD(0x000900C4),
+                        None, 0, None, 0, ctypes.byref(ctypes.wintypes.DWORD(0)), None
+                    )
+                except Exception:
+                    pass
             self.files.append({"path": full_path,
                               "length": length,
                               "start": torrent_offset,
@@ -59,7 +73,6 @@ class TorrentStorage:
                 f = file_info["file"]
                 f.seek(file_relative_offset)
                 f.write(chunk)
-                f.flush()  # ensure data written to disk
                 
                 # updating da offset and remaining for next file
                 offset += bytes_to_write
@@ -87,7 +100,10 @@ class TorrentStorage:
                 file_relative_offset = overlap_start - file_start
                 f = file_info["file"]
                 f.seek(file_relative_offset)
-                result += f.read(bytes_to_read)
+                chunk = f.read(bytes_to_read)
+                if len(chunk) < bytes_to_read:
+                    chunk += b"\x00" * (bytes_to_read - len(chunk))
+                result += chunk
                 
                 
                 offset += bytes_to_read
@@ -97,6 +113,9 @@ class TorrentStorage:
     def mark_completed(self, piece_index):
         self.completed.add(piece_index)
     
+    def has_piece(self, piece_index):
+        return piece_index in self.completed
+
     def flush_all(self):
         """Flush all file buffers to disk."""
         for file_info in self.files:

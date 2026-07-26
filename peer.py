@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import bencodepy
 import requests
 import socket
+import threading
 
 def find_udp_peers(tracker, info_hash, peer_id = "a"*20, port=6881, uploaded=0, downloaded=0, left=2**31-1):
     parsed = urlparse(tracker)
@@ -167,12 +168,13 @@ class PeerSession:
         self.sock = None
         self.remote_peer_id = None                 
         self.bitfield = None
+        self.have_pieces = set()
+        self.has_all = False
         self.is_choking = True
         self.is_interested = False
         self.peer_choking = True
         self.peer_interested = False
-        
-        
+        self.send_lock = threading.Lock()
         
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port), timeout=10)
@@ -184,6 +186,7 @@ class PeerSession:
                                             type=handshake_type)
         self.bitfield_wait()
         self.interested_send()
+        self.unchoke_send()
         self.unchoke_wait()
         
         # use a longer timeout for data transfer (peers can be slow)
@@ -200,8 +203,10 @@ class PeerSession:
         return message_body[0], message_body[1:]
 
     def has_piece(self, piece_index):
+        if self.has_all or piece_index in self.have_pieces:
+            return True
         if self.bitfield is None:
-            return False
+            return True
         
         byte_index = piece_index // 8
         bit_index = 7 - (piece_index % 8)
@@ -220,7 +225,7 @@ class PeerSession:
         # We wait for a short time for bitfield. If we get other messages like HAVE (4), UNCHOKE (1),
         # or EXTENSION (20), we process them but we might exit the bitfield loop if it's clear 
         # the bitfield phase is over.
-        self.sock.settimeout(2.0)
+        self.sock.settimeout(3.0)
         try:
             while True:
                 msg_id, payload = self.read_message()
@@ -232,29 +237,76 @@ class PeerSession:
                         peer_ext_handshake = bencodepy.decode(payload[1:])
                         if b"m" in peer_ext_handshake and b"ut_metadata" in peer_ext_handshake[b"m"]:
                             self.peer_metadata_id = peer_ext_handshake[b"m"][b"ut_metadata"]
-                elif msg_id in (1, 4):
-                    # Peer sent unchoke or have, meaning they skipped bitfield (likely no pieces)
+                elif msg_id == 4 and payload and len(payload) >= 4:
+                    self.have_pieces.add(int.from_bytes(payload[:4], "big"))
+                elif msg_id == 14:
+                    self.has_all = True
+                elif msg_id == 1:
+                    self.peer_choking = False
                     break
         except socket.timeout:
-            # Peer didn't send bitfield in time, probably has no pieces or is silent
             pass
         finally:
             self.sock.settimeout(10.0) # restore default timeout
             
+    def send(self, data):
+        if self.sock:
+            with self.send_lock:
+                self.sock.sendall(data)
+
     def interested_send(self):
         msg = (1).to_bytes(4, "big") + (2).to_bytes(1, "big")
-        self.sock.send(msg)
+        self.send(msg)
         self.is_interested = True
+        
+    def unchoke_send(self):
+        msg = (1).to_bytes(4, "big") + (1).to_bytes(1, "big")
+        self.send(msg)
+        self.is_choking = False
+
+    def send_have(self, piece_index):
+        msg = (5).to_bytes(4, "big") + (4).to_bytes(1, "big") + piece_index.to_bytes(4, "big")
+        try:
+            self.send(msg)
+        except Exception:
+            pass
+
+    def serve_request(self, storage, payload):
+        if len(payload) < 12 or not storage:
+            return 0
+        piece_index = int.from_bytes(payload[0:4], "big")
+        begin = int.from_bytes(payload[4:8], "big")
+        length = int.from_bytes(payload[8:12], "big")
+        
+        if length > 131072:
+            return 0
+            
+        if not storage.has_piece(piece_index):
+            return 0
+            
+        try:
+            block_data = storage.read_block(piece_index, begin, length)
+            if len(block_data) != length:
+                return 0
+            msg = (len(block_data) + 9).to_bytes(4, "big") + (7).to_bytes(1, "big") + piece_index.to_bytes(4, "big") + begin.to_bytes(4, "big") + block_data
+            self.send(msg)
+            return len(block_data)
+        except Exception:
+            return 0
         
     def unchoke_wait(self):
         # We don't block forever, just wait a bit for unchoke
-        self.sock.settimeout(2.0)
+        self.sock.settimeout(3.0)
         try:
             while True:
                 msg_id, payload = self.read_message()
                 if msg_id == 1:
                     self.peer_choking = False
                     break
+                elif msg_id == 4 and payload and len(payload) >= 4:
+                    self.have_pieces.add(int.from_bytes(payload[:4], "big"))
+                elif msg_id == 14:
+                    self.has_all = True
                 elif msg_id == 20:
                     if payload and payload[0] == 0:
                         peer_ext_handshake = bencodepy.decode(payload[1:])

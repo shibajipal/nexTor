@@ -3,14 +3,23 @@
 from peer import read_exactly, tcp_handshake, PeerSession
 from storage import TorrentStorage
 class ChokedError(Exception):
-    """Raised when a peer chokes us mid-download, discarding all pending requests."""
+    # raised when a peer chokes us mid-download, discarding all pending requests
     pass
 
 
 MAX_IN_FLIGHT = 20
 MAX_WRONG_BLOCKS = 5  # Give up if peer sends too many wrong pieces
 
-def download_piece(storage, peer, piece_index, length, total_length, active_pieces=None):
+def download_piece(storage, peer, piece_index, length, total_length, active_pieces=None, progress=None):
+    if hasattr(peer, "sock"):
+        sock = peer.sock
+        session = peer
+        send_fn = peer.send
+    else:
+        sock = peer
+        session = None
+        send_fn = peer.sendall
+
     buffer = b""
     begin = 0
     block_length = 2 ** 14
@@ -41,7 +50,7 @@ def download_piece(storage, peer, piece_index, length, total_length, active_piec
     while next_to_send < len(blocks) and in_flight < MAX_IN_FLIGHT:
         begin, send_length = blocks[next_to_send]
         request = (13).to_bytes(4, "big") + (6).to_bytes(1, "big") + piece_index.to_bytes(4, "big") + begin.to_bytes(4, "big") + send_length.to_bytes(4, "big")
-        peer.send(request)
+        send_fn(request)
         in_flight += 1
         next_to_send += 1
         
@@ -49,14 +58,14 @@ def download_piece(storage, peer, piece_index, length, total_length, active_piec
     received_bytes = 0
         
     while received_count < len(blocks):
-        length_prefix = read_exactly(peer, 4)
+        length_prefix = read_exactly(sock, 4)
         message_length = int.from_bytes(length_prefix, "big")
         if message_length == 0:
             continue  # keep-alive message, no body
-        message_body = read_exactly(peer, message_length)
+        message_body = read_exactly(sock, message_length)
     
         if message_body[0] == 0:
-            # choke — peer discarded all our pending requests
+            # choke -> peer discarded all our pending requests
             if active_pieces is not None and piece_index in active_pieces:
                 del active_pieces[piece_index]
             raise ChokedError(f"peer choked us during piece {piece_index}")
@@ -88,11 +97,19 @@ def download_piece(storage, peer, piece_index, length, total_length, active_piec
             if next_to_send < len(blocks):
                 begin, send_length = blocks[next_to_send]
                 request = ((13).to_bytes(4, "big") + (6).to_bytes(1, "big")  + piece_index.to_bytes(4, "big") + begin.to_bytes(4, "big") + send_length.to_bytes(4, "big"))
-                peer.send(request)
+                send_fn(request)
                 in_flight += 1
                 next_to_send += 1
+        elif message_body[0] == 6 and session is not None:
+            uploaded = session.serve_request(storage, message_body[1:])
+            if uploaded > 0 and progress is not None:
+                peer_id = f"{session.host}:{session.port}"
+                req_piece = int.from_bytes(message_body[1:5], "big")
+                progress.update_upload(uploaded, peer_id, req_piece)
+        elif message_body[0] == 4 and session is not None and len(message_body) >= 5:
+            session.have_pieces.add(int.from_bytes(message_body[1:5], "big"))
         else:
-            # Non-piece message (unchoke, have, etc.) — skip it
+            # non-piece message (unchoke, have, etc.) — skip it
             continue
     
     # piece done — remove from active display
