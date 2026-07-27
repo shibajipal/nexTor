@@ -38,7 +38,7 @@ def find_udp_peers(tracker, info_hash, peer_id = "a"*20, port=6881, uploaded=0, 
     sock.close()
     
     action, resp_tid, interval, leechers, seeders = struct.unpack(">IIIII", response[:20])
-    print(f"tracker: {tracker}, leechers: {leechers}, seeders: {seeders}")
+    # print(f"tracker: {tracker}, leechers: {leechers}, seeders: {seeders}")
     
     peer_data = response[20:]
     all_peers = []

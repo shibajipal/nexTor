@@ -143,14 +143,15 @@ class ProgressTracker:
         
         lines.append(f"{self.CYAN}{'=' * 78}{self.RESET}")
         
+        fname = self.file_name if len(self.file_name) <= 35 else (self.file_name[:32] + "...")
         pct_str = f"<{percent*100:.1f}%>"
-        visible_len = len(self.file_name) + 1 + 1 + bar_w + 1 + 1 + len(pct_str)
+        visible_len = len(fname) + 1 + 1 + bar_w + 1 + 1 + len(pct_str)
         pad = max(0, 78 - visible_len) // 2
-        lines.append(" " * pad + f"{self.file_name} [{bar}] {pct_str}")
+        lines.append(" " * pad + f"{fname} [{bar}] {pct_str}")
         
         lines.append(f"{self.CYAN}{'=' * 78}{self.RESET}")
         
-        header = f"{'Curr DL Speed':<14}{'Curr UL Speed':<14}{'Total DL':<13}{'Total UL':<13}{'ETA':<10}{'Piece Count':<12}"
+        header = f"{'DL Speed':<14}{'UL Speed':<14}{'Total DL':<13}{'Total UL':<13}{'ETA':<10}{'Piece Count':<12}"
         lines.append(header)
         
         values = f"{dl_speed_str:<14}{ul_speed_str:<14}{total_dl_str:<13}{total_ul_str:<13}{eta_str:<10}{pieces_str:<12}"
@@ -205,8 +206,9 @@ class ProgressTracker:
             for host, p_speed, idx, recv, total in top_peers:
                 p = recv / total if total > 0 else 0
                 p_speed_str = self._format_speed(p_speed)
+                host_str = host[:21]
                 lines.append(
-                    f"  {self.CYAN}{host:<21}{self.RESET} | "
+                    f"  {self.CYAN}{host_str:<21}{self.RESET} | "
                     f"{self.GREEN}{p_speed_str:<10}{self.RESET} | "
                     f"Piece {idx:>4} ({p*100:>5.1f}%)"
                 )
@@ -240,8 +242,9 @@ class ProgressTracker:
             for host, p_speed, idx, total_ul in top_ul_peers:
                 p_speed_str = self._format_speed(p_speed)
                 ul_total_str = f"{total_ul / (1024**2):.2f} MiB" if total_ul >= 1024*1024 else f"{total_ul / 1024:.1f} KiB"
+                host_str = host[:21]
                 lines.append(
-                    f"  {self.CYAN}{host:<21}{self.RESET} | "
+                    f"  {self.CYAN}{host_str:<21}{self.RESET} | "
                     f"{self.GREEN}{p_speed_str:<10}{self.RESET} | "
                     f"Piece {idx:>4} ({ul_total_str})"
                 )
@@ -395,7 +398,7 @@ async def completion_monitor(content_pieces, sessions):
     while True:
         await asyncio.sleep(0.5)
         if all(p is not None for p in content_pieces):
-            # All pieces confirmed downloaded — kill sockets so any blocked
+            # all pieces confirmed downloaded - kill sockets so any blocked
             # read_exactly calls in executor threads raise OSError and exit.
             for session in sessions:
                 try:
