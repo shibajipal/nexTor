@@ -189,8 +189,8 @@ class PeerSession:
         self.unchoke_send()
         self.unchoke_wait()
         
-        # use a longer timeout for data transfer (peers can be slow)
-        self.sock.settimeout(120)
+        # use a responsive timeout for data transfer (45s)
+        self.sock.settimeout(45)
         
         
         
@@ -315,5 +315,5 @@ class PeerSession:
         except socket.timeout:
             pass
         finally:
-            self.sock.settimeout(120.0)
+            self.sock.settimeout(45.0)
                 

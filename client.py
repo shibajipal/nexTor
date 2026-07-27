@@ -308,66 +308,82 @@ async def endgame_checker(content_pieces, queue, sessions, piece_count):
                     queue.put_nowait(piece_index)
                     
 
-async def peer_worker(storage, session, queue, length, total_length, content_pieces, progress, sessions=None):
-    while True:
-        try:
-            piece_index = queue.get_nowait()
-        except asyncio.QueueEmpty:
-            if all(p is not None for p in content_pieces):
-                return
-            await serve_idle_peer(session, storage, progress)
-            await asyncio.sleep(0.1)
-            continue
-        
-        if content_pieces[piece_index] is not None:
-            continue
-        
-        if not session.has_piece(piece_index):
-            queue.put_nowait(piece_index)
-            await serve_idle_peer(session, storage, progress)
-            await asyncio.sleep(0.05)
-            continue
-        
-        try:
-            peer_id = f"{session.host}:{session.port}"
-            progress.active_peers[peer_id] = piece_index
-            loop = asyncio.get_event_loop()
+async def peer_worker(storage, session, queue, length, total_length, content_pieces, progress, sessions=None, connected_addrs=None, addr=None):
+    try:
+        while True:
             try:
-                buffer = await loop.run_in_executor(
-                    None, download_piece, storage, session, piece_index, length, total_length, progress.active_pieces, progress
-                )
-            finally:
-                if progress.active_peers.get(peer_id) == piece_index:
-                    del progress.active_peers[peer_id]
+                piece_index = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                if all(p is not None for p in content_pieces):
+                    return
+                await serve_idle_peer(session, storage, progress)
+                await asyncio.sleep(0.1)
+                continue
             
-            if content_pieces[piece_index] is None:
-                content_pieces[piece_index] = buffer
-                storage.mark_completed(piece_index)
-                progress.update(len(buffer))
-                if sessions:
-                    for s in sessions:
-                        try:
-                            s.send_have(piece_index)
-                        except Exception:
-                            pass
-        except ChokedError:
-            queue.put_nowait(piece_index)
-            def wait_for_unchoke():
-                while True:
-                    msg_id, _ = session.read_message()
-                    if msg_id == 1:
-                        return
-            try:
-                await asyncio.wait_for(
-                    loop.run_in_executor(None, wait_for_unchoke),
-                    timeout=30
-                )
-            except Exception:
-                return
-        except Exception as e:
-            if content_pieces[piece_index] is None:
+            if content_pieces[piece_index] is not None:
+                continue
+            
+            if not session.has_piece(piece_index):
                 queue.put_nowait(piece_index)
-            return
+                await serve_idle_peer(session, storage, progress)
+                await asyncio.sleep(0.05)
+                continue
+            
+            try:
+                peer_id = f"{session.host}:{session.port}"
+                progress.active_peers[peer_id] = piece_index
+                loop = asyncio.get_event_loop()
+                try:
+                    buffer = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, download_piece, storage, session, piece_index, length, total_length, progress.active_pieces, progress
+                        ),
+                        timeout=60
+                    )
+                finally:
+                    if progress.active_peers.get(peer_id) == piece_index:
+                        del progress.active_peers[peer_id]
+                
+                if content_pieces[piece_index] is None:
+                    content_pieces[piece_index] = True
+                    storage.mark_completed(piece_index)
+                    progress.update(len(buffer))
+                    if sessions:
+                        for s in sessions:
+                            try:
+                                s.send_have(piece_index)
+                            except Exception:
+                                pass
+            except ChokedError:
+                queue.put_nowait(piece_index)
+                def wait_for_unchoke():
+                    while True:
+                        msg_id, _ = session.read_message()
+                        if msg_id == 1:
+                            return
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, wait_for_unchoke),
+                        timeout=30
+                    )
+                except Exception:
+                    return
+            except Exception as e:
+                if content_pieces[piece_index] is None:
+                    queue.put_nowait(piece_index)
+                return
+    finally:
+        try:
+            session.disconnect()
+        except Exception:
+            pass
+        if sessions is not None and session in sessions:
+            try:
+                sessions.remove(session)
+            except Exception:
+                pass
+        if connected_addrs is not None and addr is not None:
+            connected_addrs.discard(addr)
         
 async def progress_display(progress):
     while progress.completed_pieces < progress.piece_count:
@@ -389,7 +405,7 @@ async def completion_monitor(content_pieces, sessions):
             return
 
 class DownloadManager:
-    def __init__(self, storage, info_hash, trackers, piece_count, length, total_length, torrent_name="Download", initial_peers=None):
+    def __init__(self, storage, info_hash, trackers, piece_count, length, total_length, torrent_name="Download", initial_peers=None, pieces_hash=None):
         self.storage = storage
         self.info_hash = info_hash
         self.trackers = trackers
@@ -400,12 +416,41 @@ class DownloadManager:
         self.all_peers = set(initial_peers or [])
         self.sessions = []
         self.content_pieces = [None] * piece_count
+        self.pieces_hash = pieces_hash
 
     async def download_all(self):
         queue = asyncio.Queue()
         progress = ProgressTracker(self.piece_count, self.length, self.total_length, self.torrent_name)
+
+        if self.pieces_hash:
+            print("Checking existing files for resumed download...")
+            verified_count = 0
+            verified_bytes = 0
+            for i in range(self.piece_count):
+                expected = self.pieces_hash[i * 20 : (i + 1) * 20]
+                piece_size = self.total_length - (i * self.length) if (i == self.piece_count - 1) else self.length
+                data = self.storage.read_block(i, 0, piece_size)
+                if len(data) == piece_size and hashlib.sha1(data).digest() == expected:
+                    self.content_pieces[i] = True
+                    self.storage.mark_completed(i)
+                    verified_count += 1
+                    verified_bytes += piece_size
+            if verified_count > 0:
+                pct = (verified_count / self.piece_count) * 100
+                print(f"Resuming download: {verified_count}/{self.piece_count} pieces ({pct:.1f}%) already verified.")
+                progress.completed_pieces = verified_count
+                progress.bytes_downloaded = verified_bytes
+            else:
+                print("No verified pieces found, starting fresh download.")
+
         for i in range(self.piece_count):
-            queue.put_nowait(i)
+            if self.content_pieces[i] is None:
+                queue.put_nowait(i)
+
+        if all(p is not None for p in self.content_pieces):
+            print("All pieces already present and verified!")
+            self.storage.flush_all()
+            return 1
 
         display_task = asyncio.create_task(progress_display(progress))
         endgame_task = asyncio.create_task(endgame_checker(self.content_pieces, queue, self.sessions, self.piece_count))
@@ -419,15 +464,21 @@ class DownloadManager:
         conn_executor = ThreadPoolExecutor(max_workers=100, thread_name_prefix="conn")
         
         async def tracker_worker(t):
-            try:
-                peers = await loop.run_in_executor(
-                    tracker_executor, lambda: find_peers_auto(t, self.info_hash, left=self.total_length)
-                )
-                for p in peers:
-                    if p not in connected_addrs:
-                        self.all_peers.add(p)
-            except Exception:
-                pass
+            while not all(p is not None for p in self.content_pieces):
+                try:
+                    left_bytes = max(0, self.total_length - progress.bytes_downloaded)
+                    peers = await loop.run_in_executor(
+                        tracker_executor, lambda: find_peers_auto(t, self.info_hash, left=left_bytes)
+                    )
+                    if peers:
+                        for p in peers:
+                            if p not in connected_addrs:
+                                self.all_peers.add(p)
+                        await asyncio.sleep(45)
+                    else:
+                        await asyncio.sleep(15)
+                except Exception:
+                    await asyncio.sleep(15)
                 
         async def tracker_discovery():
             tasks = [asyncio.create_task(tracker_worker(t)) for t in self.trackers]
@@ -436,10 +487,17 @@ class DownloadManager:
 
         async def connection_worker():
             pending_connections = set()
+            last_connect_attempt = {}
             while not all(p is not None for p in self.content_pieces):
-                unconnected = [p for p in list(self.all_peers) if p not in connected_addrs and p not in pending_connections]
+                now = time.time()
+                unconnected = [
+                    p for p in list(self.all_peers) 
+                    if p not in connected_addrs and p not in pending_connections
+                    and (now - last_connect_attempt.get(p, 0)) >= 15
+                ]
                 for p_addr in unconnected:
                     pending_connections.add(p_addr)
+                    last_connect_attempt[p_addr] = now
                     
                     async def connect_and_spawn(addr):
                         try:
@@ -447,7 +505,7 @@ class DownloadManager:
                             self.sessions.append(session)
                             connected_addrs.add(addr)
                             worker_task = asyncio.create_task(
-                                peer_worker(self.storage, session, queue, self.length, self.total_length, self.content_pieces, progress, self.sessions)
+                                peer_worker(self.storage, session, queue, self.length, self.total_length, self.content_pieces, progress, self.sessions, connected_addrs, addr)
                             )
                             peer_workers.add(worker_task)
                             worker_task.add_done_callback(peer_workers.discard)
@@ -525,11 +583,11 @@ async def main():
         if not torrent_name:
             torrent_name = os.path.basename(file)
 
-        manager = DownloadManager(storage, info_hash, trackers, piece_count, length, total_length, torrent_name)
+        pieces_hash = content[b"info"][b"pieces"]
+        manager = DownloadManager(storage, info_hash, trackers, piece_count, length, total_length, torrent_name, pieces_hash=pieces_hash)
         val = await manager.download_all()
 
         print("\nVERIFYING SHA1 HASHES...")
-        pieces_hash = content[b"info"][b"pieces"]
         failed = []
         for i in range(piece_count):
             expected = pieces_hash[i * 20 : (i + 1) * 20]
@@ -654,11 +712,11 @@ async def main():
         if not torrent_name:
             torrent_name = os.path.basename(download_path)
 
-        manager = DownloadManager(storage, info_hash, trackers, piece_count, length, total_length, torrent_name, initial_peers=list(all_peers))
+        pieces_hash = info[b"pieces"]
+        manager = DownloadManager(storage, info_hash, trackers, piece_count, length, total_length, torrent_name, initial_peers=list(all_peers), pieces_hash=pieces_hash)
         val = await manager.download_all()
 
         print("\nVERIFYING SHA1 HASHES...")
-        pieces_hash = info[b"pieces"]
         failed = []
         for i in range(piece_count):
             expected = pieces_hash[i * 20 : (i + 1) * 20]
