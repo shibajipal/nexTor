@@ -611,90 +611,88 @@ async def main():
         storage.close_all()
 
     elif command == "magnet_download":
-        ### this is unusuable at the moment, will fix it later!
         download_path = sys.argv[2]
         magnet_link = sys.argv[3]
         info_hash, trackers = parse_magnet_link(magnet_link)
         info_hash = bytes.fromhex(info_hash)
         
         all_peers = set()
-        def query_tracker(t):
-            return find_peers_auto(tracker=t, info_hash=info_hash, left=10)
-        with ThreadPoolExecutor(max_workers=250) as executor:
-            futures = {executor.submit(query_tracker, t): t for t in trackers}
-            try:
-                for future in as_completed(futures, timeout=10):
-                    t = futures[future]
-                    try:
-                        peers = future.result(timeout=5)
-                        all_peers.update(peers)
-                    except Exception as e:
-                        """tracker failed"""
-                        # print(f"tracker {t} failed: {e}")
-            except TimeoutError:
-                """tracker timeout"""
-                # print(f"tracker discovery timed out, continuing with {len(all_peers)} peers found")
-        all_peers = list(all_peers)
-        # print(f"found {len(all_peers)} unique peers from {len(trackers)} trackers")
-        
-        if not all_peers:
-            raise Exception("Could not find any peers from the provided magnet trackers.")
-            
+        fetched_metadata = False
         info = None
-        def fetch_metadata_from_peer(p_addr):
-            HOST, PORT = p_addr.split(":")
-            peer = socket.create_connection((HOST, int(PORT)), timeout=5)
-            tcp_handshake(sock=peer, info_hash=info_hash, type="magnet")
-            peer_metadata_id, metadata_size = extension_handshake(peer)
-            
-            if metadata_size <= 0:
-                peer.close()
-                raise Exception("no metadata")
-
-            piece_count = math.ceil(metadata_size / 16384)
-            metadata_pieces = [None] * piece_count
-
-            for piece in range(piece_count):
-                request_payload = bencodepy.encode({b"msg_type": 0, b"piece": piece})
-                request_msg = (len(request_payload) + 2).to_bytes(4, "big") + (20).to_bytes(1, "big") + int(peer_metadata_id).to_bytes(1, "big") + request_payload
-                peer.send(request_msg)
-                
-                while True:
-                    length_prefix = read_exactly(peer, 4)
-                    message_length = int.from_bytes(length_prefix, "big")
-                    message_body = read_exactly(peer, message_length)
-                    if message_body[0] == 20:
-                        payload = message_body[2:]
-                        response_dict = bencodepy.decode(payload)
-                        dict_len = len(bencodepy.encode(response_dict))
-
-                        if response_dict[b"msg_type"] == 2:
-                            peer.close()
-                            raise Exception("rejected")
-                        
-                        if response_dict[b"msg_type"] == 1:
-                            raw_piece = payload[dict_len:]
-                            metadata_pieces[piece] = raw_piece
-                            break
-
-            peer.close()
-            full_metadata = b"".join(metadata_pieces)
-            info_dict = bencodepy.decode(full_metadata)
-            return info_dict
-
-        # print("Fetching metadata from peers in parallel...")
-        with ThreadPoolExecutor(max_workers=250) as executor:
-            futures = {executor.submit(fetch_metadata_from_peer, p): p for p in all_peers}
-            for future in as_completed(futures):
-                try:
-                    info = future.result()
-                    # print(f"Successfully fetched metadata!")
+        for t in trackers:
+            try:
+                peers = find_peers_auto(tracker=t,
+                                        info_hash=info_hash,
+                                        left=10)
+                all_peers.update(peers)
+                if fetched_metadata:
                     break
-                except Exception:
-                    pass
-                    
+                for p_addr in all_peers:
+                    try:
+                        HOST, PORT = p_addr.split(":")
+                        peer = socket.create_connection((HOST, int(PORT)), timeout=5)
+                        tcp_handshake(sock=peer,
+                                    info_hash=info_hash,
+                                    type="magnet")
+                        peer_metadata_id, metadata_size = extension_handshake(peer)
+
+                        if metadata_size <= 0:
+                            peer.close()
+                            continue
+
+                        
+                        metadata_piece_count = math.ceil(metadata_size / 16384)
+                        metadata_pieces = [None] * metadata_piece_count
+
+                        for piece in range(metadata_piece_count):
+                            request_payload = bencodepy.encode({b"msg_type": 0, b"piece": piece})
+
+                            request_msg = (
+                                (len(request_payload) + 2).to_bytes(4, "big") +
+                                (20).to_bytes(1, "big") +
+                                int(peer_metadata_id).to_bytes(1, "big") +
+                                request_payload
+                            )
+                            peer.send(request_msg)
+
+                            while True:
+                                length_prefix = read_exactly(peer, 4)
+                                message_length = int.from_bytes(length_prefix, "big")
+                                message_body = read_exactly(peer, message_length)
+                                if message_body[0] == 20:
+                                    payload = message_body[2:]
+                                    response_dict = bencodepy.decode(payload)
+                                    dict_len = len(bencodepy.encode(response_dict))
+
+                                    if response_dict[b"msg_type"] == 2:
+                                        raise Exception("rejected")
+
+                                    if response_dict[b"msg_type"] == 1:
+                                        raw_piece = payload[dict_len:]
+                                        metadata_pieces[piece] = raw_piece
+                                        break
+
+                        peer.close()
+                        full_metadata = b"".join(metadata_pieces)
+                        info = bencodepy.decode(full_metadata)
+                        print("successfully fetched metadata")
+                        fetched_metadata = True
+                        break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        if not all_peers:
+            raise Exception("no peers found")
+
+        print(f"found {len(all_peers)} unique peers from {len(trackers)} trackers")
+
+        
+
         if not info:
-            raise Exception("Could not fetch metadata from any peer.")
+            raise Exception("couldnt fetch metdata")
+        
             
         length = info[b"piece length"]
         files, total_length = parse_file_info(info)
@@ -716,7 +714,7 @@ async def main():
             torrent_name = os.path.basename(download_path)
 
         pieces_hash = info[b"pieces"]
-        manager = DownloadManager(storage, info_hash, trackers, piece_count, length, total_length, torrent_name, initial_peers=list(all_peers), pieces_hash=pieces_hash)
+        manager = DownloadManager(storage, info_hash, trackers, piece_count, length, total_length, torrent_name, pieces_hash=pieces_hash)
         val = await manager.download_all()
 
         print("\nVERIFYING SHA1 HASHES...")
