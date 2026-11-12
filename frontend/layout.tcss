@@ -1,0 +1,76 @@
+/* ─────────────────────────────────────────────────────
+   nexTor TUI — Textual CSS
+   Font   : JetBrainsMono Nerd Font (configured in terminal)
+   Theme  : Unified Dark Olive Green (#2E3A1F) · White (#FFFFFF)
+   Borders: Round Sage (#C8D6A0) · Headings in top-right border
+   Style  : Clean, normal weight — no bold text anywhere
+   ───────────────────────────────────────────────────── */
+
+/* ── Screen & Global Defaults ───────────────────────── */
+Screen {
+    background: #2E3A1F;
+    color: #FFFFFF;
+    text-style: none;
+    padding: 1 1;
+}
+
+/* ── Main horizontal layout split ───────────────────── */
+#main-container {
+    width: 100%;
+    height: 100%;
+}
+
+/* ── Left column (holds top-row + search area) ──────── */
+#left-column {
+    width: 1fr;
+    height: 100%;
+}
+
+/* ── Top row inside left column (logo + downloads) ──── */
+#top-row {
+    height: 9;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+/* ── Shared Panel Styling ───────────────────────────── */
+.panel {
+    border: round #C8D6A0;
+    background: #2E3A1F;
+    border-title-align: right;
+    border-title-color: #FFFFFF;
+    border-title-style: none;
+    border-title-background: #2E3A1F;
+    color: #FFFFFF;
+    text-style: none;
+    padding: 0 1;
+}
+
+/* ── Logo Box ───────────────────────────────────────── */
+/* 58 cols allows the 52-char ASCII art to render with 1 space margin on each side */
+#logo-box {
+    width: 58;
+    min-width: 58;
+    height: 9;
+    padding: 0 1;
+    margin-right: 1;
+}
+
+/* ── Current Downloads Box ──────────────────────────── */
+#downloads-box {
+    width: 1fr;
+    height: 9;
+}
+
+/* ── Search Area Box ────────────────────────────────── */
+#search-box {
+    width: 100%;
+    height: 1fr;
+}
+
+/* ── Stats Box (spans full height on right) ─────────── */
+#stats-box {
+    width: 28;
+    height: 100%;
+    margin-left: 1;
+}
