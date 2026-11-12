@@ -550,6 +550,9 @@ async def download_all(storage, sessions, piece_count, length, total_length, fil
     return 1
 
 async def main():
+    if not sys.argv or len(sys.argv) < 2:
+        print("hello world")
+        exit(1)
     command = sys.argv[1]
     if command == "download_torrent":
         download_path = sys.argv[2]
