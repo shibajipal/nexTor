@@ -10,7 +10,7 @@ from textual.containers import Horizontal, Vertical
 
 from .widgets.logo import LogoWidget
 from .widgets.downloads import DownloadsWidget
-from .widgets.stats import StatsWidget
+from .widgets.stats import StatsWidget, DownloadStarted, DownloadFinished
 from .widgets.search import SearchWidget, TorrentSelected
 
 
@@ -59,6 +59,21 @@ class NexTorApp(App):
         """When a .torrent is downloaded into RAM, populate the stats panel."""
         stats = self.query_one(StatsWidget)
         stats.show_torrent_info(event.torrent_data, event.title)
+
+    # ── Download events ───────────────────────────────────────────────────
+
+    def on_download_started(self, event: DownloadStarted) -> None:
+        """Update the downloads panel when a download begins."""
+        downloads = self.query_one(DownloadsWidget)
+        downloads.update(f"⬇  {event.torrent_name}")
+
+    def on_download_finished(self, event: DownloadFinished) -> None:
+        """Update the downloads panel when a download completes."""
+        downloads = self.query_one(DownloadsWidget)
+        if event.success:
+            downloads.update(f"✓  {event.torrent_name} — Complete")
+        else:
+            downloads.update(f"✗  {event.torrent_name} — {event.message}")
 
 
 # Allow running directly: python frontend/app.py
