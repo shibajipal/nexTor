@@ -148,6 +148,43 @@ def download_attachment(torrent_page_url: str, output_dir: Path, timeout: int) -
             browser.close()
 
 
+def download_attachment_to_ram(torrent_page_url: str, timeout: int = 30) -> bytes:
+    """Download the .torrent attachment into memory (no disk I/O).
+
+    Returns the raw bytes of the .torrent file.
+    """
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as error:
+        raise RuntimeError(
+            "The final download step requires Playwright. "
+            "Install it with: python -m pip install playwright; "
+            "then run: python -m playwright install chromium"
+        ) from error
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        try:
+            page = browser.new_page(accept_downloads=True)
+            page.goto(torrent_page_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            with page.expect_download(timeout=timeout * 1000) as download_info:
+                page.get_by_role("link", name="Download attachment").click()
+            download = download_info.value
+            # Read into RAM via a temporary path provided by Playwright
+            tmp_path = download.path()          # waits for download to finish
+            if tmp_path is None:
+                raise RuntimeError("Download produced no file.")
+            raw_bytes = Path(tmp_path).read_bytes()
+            return raw_bytes
+        except PlaywrightTimeoutError as error:
+            raise RuntimeError(
+                'Timed out waiting for the "Download attachment" link or download.'
+            ) from error
+        finally:
+            browser.close()
+
+
 def choose_result(results: list[SearchResult]) -> SearchResult:
     print("\nTop search results:\n")
     for index, result in enumerate(results, start=1):

@@ -11,7 +11,7 @@ from textual.containers import Horizontal, Vertical
 from .widgets.logo import LogoWidget
 from .widgets.downloads import DownloadsWidget
 from .widgets.stats import StatsWidget
-from .widgets.search import SearchWidget
+from .widgets.search import SearchWidget, TorrentSelected
 
 
 CSS_PATH = Path(__file__).parent / "layout.tcss"
@@ -52,6 +52,13 @@ class NexTorApp(App):
             with Vertical(id="stats-box", classes="panel") as st_box:
                 st_box.border_title = " stats "
                 yield StatsWidget()
+
+    # ── Wire search → stats ───────────────────────────────────────────────
+
+    def on_torrent_selected(self, event: TorrentSelected) -> None:
+        """When a .torrent is downloaded into RAM, populate the stats panel."""
+        stats = self.query_one(StatsWidget)
+        stats.show_torrent_info(event.torrent_data, event.title)
 
 
 # Allow running directly: python frontend/app.py
