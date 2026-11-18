@@ -58,7 +58,7 @@ Screen {
 
 /* ── Current Downloads Box ──────────────────────────── */
 #downloads-box {
-    width: 1fr;
+    width: 0.8fr;
     height: 9;
 }
 
@@ -70,7 +70,7 @@ Screen {
 
 /* ── Stats Box (spans full height on right) ─────────── */
 #stats-box {
-    width: 28;
+    width: 50;
     height: 100%;
     margin-left: 1;
 }
